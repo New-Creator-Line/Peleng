@@ -1,0 +1,318 @@
+{
+  "1": {
+    "cam_id": 1,
+    "video_path": "Peleng/\u0445\u0430\u043a\u0430\u0442\u043e\u043d/Way1.FinalImage.CineCameraActor1.mp4",
+    "frame_idx": 100,
+    "frame_shape": [
+      1080,
+      1920,
+      3
+    ],
+    "sky_pixel_count": 640212,
+    "sky_cols_count": 1920,
+    "sky_horizon_min_row": 31,
+    "sky_horizon_max_row": 641,
+    "sky_horizon_mean_row": 332.44375,
+    "tree_pixel_count": 58889,
+    "tree_roots_count": 10,
+    "tree_roots": [
+      [
+        1852,
+        646
+      ],
+      [
+        526,
+        622
+      ],
+      [
+        1740,
+        615
+      ],
+      [
+        260,
+        607
+      ],
+      [
+        440,
+        595
+      ],
+      [
+        335,
+        593
+      ],
+      [
+        502,
+        574
+      ],
+      [
+        302,
+        557
+      ],
+      [
+        474,
+        466
+      ],
+      [
+        516,
+        433
+      ]
+    ],
+    "debug_overlay_path": "Peleng/results/calibration/cam1_debug.png"
+  },
+  "2": {
+    "cam_id": 2,
+    "video_path": "Peleng/\u0445\u0430\u043a\u0430\u0442\u043e\u043d/Way1.FinalImage.CineCameraActor2.mp4",
+    "frame_idx": 100,
+    "frame_shape": [
+      1080,
+      1920,
+      3
+    ],
+    "sky_pixel_count": 82703,
+    "sky_cols_count": 671,
+    "sky_horizon_min_row": 1,
+    "sky_horizon_max_row": 234,
+    "sky_horizon_mean_row": 122.39046199701937,
+    "tree_pixel_count": 55722,
+    "tree_roots_count": 8,
+    "tree_roots": [
+      [
+        134,
+        721
+      ],
+      [
+        189,
+        701
+      ],
+      [
+        291,
+        699
+      ],
+      [
+        781,
+        254
+      ],
+      [
+        660,
+        201
+      ],
+      [
+        864,
+        150
+      ],
+      [
+        715,
+        102
+      ],
+      [
+        662,
+        91
+      ]
+    ],
+    "debug_overlay_path": "Peleng/results/calibration/cam2_debug.png"
+  },
+  "3": {
+    "cam_id": 3,
+    "video_path": "Peleng/\u0445\u0430\u043a\u0430\u0442\u043e\u043d/Way1.FinalImage.CineCameraActor3.mp4",
+    "frame_idx": 100,
+    "frame_shape": [
+      1080,
+      1920,
+      3
+    ],
+    "sky_pixel_count": 186427,
+    "sky_cols_count": 1326,
+    "sky_horizon_min_row": 1,
+    "sky_horizon_max_row": 429,
+    "sky_horizon_mean_row": 139.86651583710406,
+    "tree_pixel_count": 210808,
+    "tree_roots_count": 11,
+    "tree_roots": [
+      [
+        1502,
+        557
+      ],
+      [
+        534,
+        552
+      ],
+      [
+        560,
+        547
+      ],
+      [
+        638,
+        527
+      ],
+      [
+        1310,
+        516
+      ],
+      [
+        1750,
+        508
+      ],
+      [
+        1451,
+        379
+      ],
+      [
+        1403,
+        369
+      ],
+      [
+        1702,
+        307
+      ],
+      [
+        1359,
+        299
+      ],
+      [
+        278,
+        289
+      ]
+    ],
+    "debug_overlay_path": "Peleng/results/calibration/cam3_debug.png"
+  },
+  "4": {
+    "cam_id": 4,
+    "video_path": "Peleng/\u0445\u0430\u043a\u0430\u0442\u043e\u043d/Way1.FinalImage.CineCameraActor4.mp4",
+    "frame_idx": 100,
+    "frame_shape": [
+      1080,
+      1920,
+      3
+    ],
+    "sky_pixel_count": 351185,
+    "sky_cols_count": 1460,
+    "sky_horizon_min_row": 1,
+    "sky_horizon_max_row": 679,
+    "sky_horizon_mean_row": 239.55547945205478,
+    "tree_pixel_count": 148499,
+    "tree_roots_count": 19,
+    "tree_roots": [
+      [
+        1761,
+        1079
+      ],
+      [
+        1833,
+        1079
+      ],
+      [
+        1723,
+        967
+      ],
+      [
+        54,
+        687
+      ],
+      [
+        29,
+        659
+      ],
+      [
+        452,
+        638
+      ],
+      [
+        601,
+        626
+      ],
+      [
+        87,
+        599
+      ],
+      [
+        552,
+        586
+      ],
+      [
+        41,
+        575
+      ],
+      [
+        455,
+        568
+      ],
+      [
+        458,
+        524
+      ],
+      [
+        85,
+        474
+      ],
+      [
+        622,
+        433
+      ],
+      [
+        497,
+        403
+      ],
+      [
+        558,
+        398
+      ],
+      [
+        653,
+        371
+      ],
+      [
+        36,
+        359
+      ],
+      [
+        577,
+        304
+      ]
+    ],
+    "debug_overlay_path": "Peleng/results/calibration/cam4_debug.png"
+  },
+  "5": {
+    "cam_id": 5,
+    "video_path": "Peleng/\u0445\u0430\u043a\u0430\u0442\u043e\u043d/Way1.FinalImage.CineCameraActor5.mp4",
+    "frame_idx": 100,
+    "frame_shape": [
+      1080,
+      1920,
+      3
+    ],
+    "sky_pixel_count": 91919,
+    "sky_cols_count": 530,
+    "sky_horizon_min_row": 1,
+    "sky_horizon_max_row": 409,
+    "sky_horizon_mean_row": 172.61320754716982,
+    "tree_pixel_count": 442774,
+    "tree_roots_count": 6,
+    "tree_roots": [
+      [
+        1902,
+        917
+      ],
+      [
+        1849,
+        835
+      ],
+      [
+        1802,
+        767
+      ],
+      [
+        1822,
+        660
+      ],
+      [
+        287,
+        511
+      ],
+      [
+        517,
+        499
+      ]
+    ],
+    "debug_overlay_path": "Peleng/results/calibration/cam5_debug.png"
+  }
+}
