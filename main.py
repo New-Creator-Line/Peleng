@@ -37,6 +37,9 @@ def run_pipeline(
     plot: bool = True,
     conf_threshold: float = 0.3,
     dt: float = 1.0 / 30.0,
+    viewer_3d: bool = True,
+    viewer_out: str = "results/peleng_3d_viewer.html",
+    use_depth_model: bool = True,
 ) -> pd.DataFrame:
     """
     Executes the full 3D reconstruction and tracking pipeline.
@@ -49,21 +52,21 @@ def run_pipeline(
     print("=" * 60)
 
     # 1. Load Camera Calibrations
-    print(f"[1/5] Loading camera calibrations from: '{calib_dir}'...")
+    print(f"[1/6] Loading camera calibrations from: '{calib_dir}'...")
     cameras = load_all_cameras(calib_dir)
     print(f"      Loaded {len(cameras)} cameras: {list(cameras.keys())}")
 
     # 2. Handle 2D Detections
     if not detections_csv or not os.path.exists(detections_csv):
         if gt_csv and os.path.exists(gt_csv):
-            print(f"[2/5] Detections file not found. Generating mock detections from GT: '{gt_csv}'...")
+            print(f"[2/6] Detections file not found. Generating mock detections from GT: '{gt_csv}'...")
             mock_path = "results/detections_2d.csv"
             generate_mock_detections(calib_dir, gt_csv, mock_path, noise_std_px=1.5)
             detections_csv = mock_path
         else:
             raise FileNotFoundError(f"Detections CSV '{detections_csv}' not found and no GT available to mock.")
 
-    print(f"[2/5] Loading 2D detections from: '{detections_csv}'...")
+    print(f"[2/6] Loading 2D detections from: '{detections_csv}'...")
     grouped_detections = load_detections(detections_csv)
     all_frames = sorted(grouped_detections.keys())
     if not all_frames:
@@ -75,7 +78,7 @@ def run_pipeline(
     triangulator = MultiViewTriangulator(reprojection_error_threshold_px=40.0)
     tracker = KalmanFilter3D(dt=dt, process_noise_std=4.0, measurement_noise_std=1.5)
 
-    print("[3/5] Running Multi-view 3D Triangulation & Kalman Filtering...")
+    print("[3/6] Running Multi-view 3D Triangulation & Kalman Filtering...")
     estimated_records = []
     triangulated_count = 0
     coasted_count = 0
@@ -185,12 +188,13 @@ def run_pipeline(
     out_df = pd.DataFrame(estimated_records)
     os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
     out_df.to_csv(output_csv, sep=';', index=False)
-    print(f"[4/5] Saved output trajectory to: '{output_csv}'")
+    print(f"[4/6] Saved output trajectory to: '{output_csv}'")
 
     # 5. Evaluation & Plotting
     gt_df = None
+    metrics: Optional[Dict[str, float]] = None
     if gt_csv and os.path.exists(gt_csv):
-        print(f"[5/5] Evaluating metrics against Ground Truth: '{gt_csv}'...")
+        print(f"[5/6] Evaluating metrics against Ground Truth: '{gt_csv}'...")
         gt_df = load_ground_truth(gt_csv)
         evaluator = TrajectoryEvaluator()
 
@@ -215,13 +219,37 @@ def run_pipeline(
         print(f"  Скорость обработки:  {metrics['fps']:.1f} FPS")
         print("-" * 40)
     else:
-        print("[5/5] Running in Blind Test mode (no Ground Truth provided).")
+        print("[5/6] Running in Blind Test mode (no Ground Truth provided).")
 
     if plot:
         plot_path = "results/trajectory_comparison.png"
         print(f"      Generating Slide 8 comparison plot -> '{plot_path}'...")
         plot_trajectory_comparison(out_df, gt_df, plot_path)
         print(f"      Saved comparison plot: '{plot_path}'")
+
+    # 6. Interactive 3D Terrain & Trajectory Viewer
+    if viewer_3d:
+        print(f"[6/6] Building 3D Terrain, Depth Point Cloud & Interactive Three.js Viewer -> '{viewer_out}'...")
+        try:
+            from src.terrain_builder import build_scene_3d_payload
+            from src.viewer_3d import export_3d_viewer_html
+
+            scene_payload = build_scene_3d_payload(
+                calib_dir=calib_dir,
+                estimated_df=out_df,
+                ground_truth_df=gt_df,
+                grouped_detections=grouped_detections,
+                metrics=metrics,
+                use_depth_model=use_depth_model,
+            )
+            export_3d_viewer_html(scene_payload, output_html_path=viewer_out)
+            print(f"      Saved interactive 3D WebGL viewer: '{viewer_out}'")
+        except ImportError as exc:
+            print(f"      [WARN] 3D terrain builder module not yet available ({exc}). Skipping 3D viewer.")
+        except Exception as exc:
+            print(f"      [WARN] Failed to generate 3D viewer ({exc}).")
+    else:
+        print("[6/6] 3D Viewer generation skipped (--no-viewer-3d).")
 
     total_time = time.perf_counter() - start_time
     print(f"\nPipeline finished successfully in {total_time:.2f}s.\n")
@@ -238,6 +266,16 @@ def main():
     parser.add_argument("--plot", action="store_true", default=True, help="Generate Slide 8 comparison plot")
     parser.add_argument("--no-plot", action="store_false", dest="plot", help="Disable plotting")
     parser.add_argument("--conf-threshold", type=float, default=0.3, help="Confidence threshold for 2D detections")
+    parser.add_argument("--viewer-3d", action="store_true", default=True, help="Generate interactive 3D Three.js HTML viewer")
+    parser.add_argument("--no-viewer-3d", action="store_false", dest="viewer_3d", help="Disable 3D viewer generation")
+    parser.add_argument("--viewer-out", default="results/peleng_3d_viewer.html", help="Output path for 3D HTML viewer")
+    parser.add_argument(
+        "--no-depth-model",
+        action="store_false",
+        dest="use_depth_model",
+        default=True,
+        help="Disable neural depth model for fast geometric terrain reconstruction",
+    )
 
     args = parser.parse_args()
 
@@ -252,6 +290,9 @@ def main():
         metrics_json=args.metrics_out,
         plot=args.plot,
         conf_threshold=args.conf_threshold,
+        viewer_3d=args.viewer_3d,
+        viewer_out=args.viewer_out,
+        use_depth_model=args.use_depth_model,
     )
 
 

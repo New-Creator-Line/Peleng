@@ -242,3 +242,13 @@ results/videos/
 # Compiled C++ Python extensions and build artifacts
 *.pyd
 build/
+
+# macOS and Agent Memory Bank (prevent accidental commits)
+.DS_Store
+**/.DS_Store
+.memory_bank/
+.worktrees/
+results/check_*.jpg
+results/qa_*.png
+results/.cache_*.npz
+results/peleng_3d_viewer*.html
