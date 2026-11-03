@@ -1,0 +1,28 @@
+{
+  "config": {
+    "data_yaml": "dataset/peleng.v3i.yolov8/data.yaml",
+    "model_name": "rtdetr-l.pt",
+    "epochs": 25,
+    "batch_size": 4,
+    "imgsz": 640,
+    "device": "0",
+    "workers": 2,
+    "patience": 15,
+    "seed": 42,
+    "erasing": 0.4,
+    "mosaic": 1.0,
+    "mixup": 0.1,
+    "project": "runs",
+    "name": "peleng_rtdetr",
+    "save_weights_dir": "weights",
+    "best_weight_name": "peleng_rtdetr_best.pt"
+  },
+  "save_dir": "C:\\projects\\Peleng\\runs\\detect\\runs\\peleng_rtdetr",
+  "metrics": {
+    "mAP50": 0.9945522388059701,
+    "mAP50-95": 0.8098867508296665,
+    "precision": 0.9837461653965227,
+    "recall": 1.0
+  },
+  "exported_weight": "weights\\peleng_rtdetr_best.pt"
+}

@@ -28,6 +28,31 @@ from src.triangulator import MultiViewTriangulator
 from src.visualizer import plot_trajectory_comparison
 
 
+def is_box_occluded(
+    o: Dict[str, Any],
+    img_w: int = 1920,
+    img_h: int = 1080,
+    margin: float = 15.0,
+    lateral_ar_threshold: float = 1.55,
+) -> bool:
+    """Detects if a 2D bounding box represents a partially occluded truck."""
+    if "is_occluded" in o and o["is_occluded"] is not None:
+        return bool(o["is_occluded"])
+    u = float(o.get("u", 0.0))
+    v = float(o.get("v", 0.0))
+    w = float(o.get("w", 0.0))
+    h = float(o.get("h", 0.0))
+    if w <= 0.0 or h <= 0.0:
+        return True
+    if (u - w / 2.0 <= margin) or (u + w / 2.0 >= img_w - margin) or \
+       (v - h / 2.0 <= margin) or (v + h / 2.0 >= img_h - margin):
+        return True
+    cam_id = o.get("cam_id")
+    if cam_id in (1, 2, 3, 4) and (w / max(1e-3, h) < lateral_ar_threshold):
+        return True
+    return False
+
+
 def run_pipeline(
     calib_dir: str,
     detections_csv: Optional[str] = None,
@@ -112,6 +137,8 @@ def run_pipeline(
     for frame_idx in range(max_frame + 1):
         obs_list = grouped_detections.get(frame_idx, [])
         valid_obs = [dict(o) for o in obs_list if o['conf'] >= conf_threshold and o['cam_id'] in cameras]
+        for o in valid_obs:
+            o['is_occluded'] = is_box_occluded(o)
 
         # Shift 2D bbox centers slightly toward the projected 3D heading (front cabin)
         vel = tracker.get_velocity() if tracker.is_initialized else np.array([1.0, -0.35, 0.0])
@@ -148,6 +175,7 @@ def run_pipeline(
         err = float("inf")
         cam_ids = list(by_cam.keys())
         pred_pos = tracker.x[:3] if tracker.is_initialized else None
+        best_had_occlusion = False
 
         if len(cam_ids) >= 2:
             best_score = float("inf")
@@ -187,7 +215,8 @@ def run_pipeline(
                                 cand_pt, cand_err = triangulator.triangulate(inlier_Ps, inlier_uvs)
                             if cand_pt is None or cand_err > pair_thr + 7.0:
                                 continue
-                            score = cand_err - 12.0 * len(inlier_Ps)
+                            is_pair_occ = o1.get('is_occluded', False) or o2.get('is_occluded', False)
+                            score = cand_err - 12.0 * len(inlier_Ps) + (16.0 if is_pair_occ else 0.0)
                             if pred_pos is not None:
                                 dist_pred = float(np.linalg.norm(cand_pt - pred_pos))
                                 if dist_pred > 3000.0:
@@ -195,6 +224,7 @@ def run_pipeline(
                             if score < best_score:
                                 best_score = score
                                 pt_3d, err = cand_pt, cand_err
+                                best_had_occlusion = is_pair_occ
 
         # Kalman Filter Step
         if pt_3d is not None and err < 60.0:
@@ -205,7 +235,7 @@ def run_pipeline(
                 curr_pos = pt_meas
             else:
                 tracker.predict()
-                noise_scale = max(0.5, err / 5.0)
+                noise_scale = max(0.5, err / 5.0) * (2.2 if best_had_occlusion else 1.0)
                 curr_pos = tracker.update(pt_meas, noise_scale=noise_scale)
             triangulated_count += 1
         elif tracker.is_initialized and valid_obs:
@@ -215,6 +245,7 @@ def run_pipeline(
             target_z = float(0.85 * np.clip(pred_pt[2] - cabin_z_shift, 300.0, 520.0) + 0.15 * 360.0)
             best_single_pt = None
             best_dist = float("inf")
+            best_single_occ = False
             for o in valid_obs:
                 if o['conf'] < 0.70:
                     continue
@@ -226,8 +257,10 @@ def run_pipeline(
                     if d < 3500.0 and d < best_dist:
                         best_dist = d
                         best_single_pt = cand_single
+                        best_single_occ = bool(o.get('is_occluded', False))
             if best_single_pt is not None:
-                curr_pos = tracker.update(best_single_pt, noise_scale=3.0)
+                noise_scale = 6.0 if best_single_occ else 3.0
+                curr_pos = tracker.update(best_single_pt, noise_scale=noise_scale)
                 single_cam_count += 1
             else:
                 curr_pos = pred_pt

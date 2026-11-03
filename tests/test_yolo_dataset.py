@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_data_yaml_structure_and_integrity():
-    yaml_path = Path("dataset_v3/data.yaml")
+    yaml_path = Path("dataset/peleng.v3i.yolov8/data.yaml")
     assert yaml_path.exists(), f"Dataset config {yaml_path} does not exist"
 
     with open(yaml_path, "r", encoding="utf-8") as f:
@@ -37,7 +37,7 @@ def test_data_yaml_structure_and_integrity():
 
 
 def test_labels_validity():
-    labels_dir = Path("dataset_v3/train/labels")
+    labels_dir = Path("dataset/peleng.v3i.yolov8/train/labels")
     assert labels_dir.exists()
 
     label_files = list(labels_dir.glob("*.txt"))

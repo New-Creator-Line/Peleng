@@ -31,7 +31,7 @@ logger = logging.getLogger("PelengYOLOTrainer")
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    data_yaml: str = "dataset_v3/data.yaml"
+    data_yaml: str = "dataset/peleng.v3i.yolov8/data.yaml"
     model_name: str = "yolov8x.pt"
     epochs: int = 50
     batch_size: int = 8

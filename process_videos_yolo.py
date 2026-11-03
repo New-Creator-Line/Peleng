@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
-from ultralytics import YOLO
+from src.yolo_detector import load_detection_model, estimate_occlusion_status
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +35,7 @@ def draw_detection(
     cam_id: int,
     frame_idx: int,
     label: str = "truck",
+    is_occluded: bool = False,
 ) -> None:
     """Draws styled bounding box and tracking HUD on frame."""
     x1, y1, x2, y2 = [int(v) for v in box]
@@ -43,7 +44,7 @@ def draw_detection(
     x2, y2 = min(w_img - 1, x2), min(h_img - 1, y2)
 
     # Box outline
-    color = (0, 255, 128)  # Emerald green (BGR)
+    color = (0, 140, 255) if is_occluded else (0, 255, 128)  # Amber if occluded, emerald if clear
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
 
     # Center point (u, v)
@@ -53,7 +54,8 @@ def draw_detection(
     cv2.circle(frame, (u_center, v_center), 7, (255, 255, 255), 1)
 
     # Label badge with confidence
-    caption = f"{label.upper()} {conf:.1%}"
+    occ_tag = " [OCCLUDED]" if is_occluded else ""
+    caption = f"{label.upper()} {conf:.1%}{occ_tag}"
     (w_text, h_text), baseline = cv2.getTextSize(caption, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
     
     badge_y1 = max(0, y1 - h_text - 8)
@@ -211,7 +213,7 @@ def process_all_videos(
     Path(csv_output).parent.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Loading YOLOv8 model from: {weights_path}")
-    model = YOLO(weights_path)
+    model = load_detection_model(weights_path)
 
     # Map video files to camera IDs
     cam_videos: Dict[int, str] = {}
@@ -297,7 +299,8 @@ def process_all_videos(
                         xywh = boxes.xywh[b_idx].cpu().numpy().tolist()
 
                         u, v, w, h = xywh
-                        draw_detection(frame, tuple(xyxy), conf, c_id, frame_idx)
+                        is_occ, occ_score = estimate_occlusion_status(float(u), float(v), float(w), float(h), cam_id=c_id)
+                        draw_detection(frame, tuple(xyxy), conf, c_id, frame_idx, is_occluded=is_occ)
 
                         detection_records.append({
                             "Frame": frame_idx,
@@ -307,6 +310,8 @@ def process_all_videos(
                             "w": round(float(w), 2),
                             "h": round(float(h), 2),
                             "conf": round(float(conf), 4),
+                            "is_occluded": 1 if is_occ else 0,
+                            "occlusion_score": round(occ_score, 3),
                         })
                         n_dets += 1
 
