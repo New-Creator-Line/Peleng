@@ -6,7 +6,7 @@ from typing import Any, Dict
 import numpy as np
 import pytest
 
-from src.viewer_3d import export_3d_viewer_html
+from src.viewer_3d import _load_cargo_truck_fbx_b64, export_3d_viewer_html
 
 
 def _make_mock_scene_payload(has_ground_truth: bool = True) -> Dict[str, Any]:
@@ -144,7 +144,7 @@ def _make_mock_scene_payload(has_ground_truth: bool = True) -> Dict[str, Any]:
 
 
 def _extract_embedded_json(html_text: str) -> Dict[str, Any]:
-    match = re.search(r"window\.SCENE_DATA\s*=\s*(\{.*?\});\s*</script>", html_text, re.DOTALL)
+    match = re.search(r"window\.SCENE_DATA\s*=\s*(\{.*?\});", html_text, re.DOTALL)
     assert match is not None, "Could not locate embedded window.SCENE_DATA JSON in HTML"
     return json.loads(match.group(1))
 
@@ -182,15 +182,30 @@ def test_export_3d_viewer_html_validation_mode(tmp_path):
     assert "Скрыть панели (H)" in html
     assert "KeyH" in html
 
-    # Verify Task 005 features: un-mirrored coords, trajectory thickness slider, style selector, 3D roadway & GT truck
+    # Verify Task 005 & 007 features: roadway, FBXLoader, CARGO_TRUCK_FBX_B64, and removal of trees/boulders
     assert "slider-traj-width" in html
     assert "select-traj-style" in html
     assert "toggle-road" in html
+    assert "<span>3D Roadway</span>" in html
+    assert "3D Roadway & Scenery" not in html
+    assert "FBXLoader" in html
+    assert "three/addons/loaders/FBXLoader.js" in html
+    assert "window.CARGO_TRUCK_FBX_B64" in html
+    assert "base64ToArrayBuffer" in html
+    assert "createAATruckMesh" in html
+    assert "createGTTruckMesh" in html
     assert "TubeGeometry" in html
     assert "roadGroup" in html
-    assert "createGTTruckMesh" in html
     assert "const z3 = (y_ue - cy) / 100.0;" in html
     assert "return new THREE.Vector3(dx, dz, dy).normalize();" in html
+
+    # Assert no procedural pine trees or rock boulders exist
+    assert "trunkGeom" not in html
+    assert "coneGeom" not in html
+    assert "boulderMat" not in html
+    assert "rockGeom" not in html
+    assert "treesPlaced" not in html
+    assert "rocksPlaced" not in html
 
     # Verify embedded JSON round-trip integrity
     embedded = _extract_embedded_json(html)
@@ -298,4 +313,57 @@ def test_main_cli_flags_and_pipeline_signature(monkeypatch):
     assert captured_kwargs["viewer_3d"] is False
     assert captured_kwargs["viewer_out"] == "results/custom_3d.html"
     assert captured_kwargs["use_depth_model"] is False
+
+
+def test_cargo_truck_fbx_embedding_and_loader(tmp_path):
+    """Verifies that CargoTruck.fbx Base64 embedding and FBXLoader parsing work as specified in Task 007."""
+    payload = _make_mock_scene_payload(has_ground_truth=True)
+    out_file = tmp_path / "fbx_viewer.html"
+
+    export_3d_viewer_html(payload, str(out_file))
+    html = out_file.read_text(encoding="utf-8")
+
+    # Verify FBXLoader import & invocation
+    assert "import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';" in html
+    assert "new FBXLoader().parse(" in html or "loader.parse(" in html
+
+    # Verify Base64 CargoTruck asset is embedded and non-trivial
+    fbx_match = re.search(r'window\.CARGO_TRUCK_FBX_B64\s*=\s*"([^"]+)";', html)
+    assert fbx_match is not None, "window.CARGO_TRUCK_FBX_B64 assignment not found in HTML"
+    b64_str = fbx_match.group(1)
+    assert len(b64_str) > 100000, "Embedded CargoTruck.fbx Base64 string appears truncated or empty"
+
+    # Verify truck scaling and rotation for coordinate system alignment
+    assert "0.014, 0.014, 0.014" in html
+    assert "Math.PI / 2" in html
+
+    # Verify Blender emissive fix
+    assert "mat.emissive.set(0x000000)" in html or "cloned.emissive.set(0x000000)" in html
+    assert "THREE.DoubleSide" in html
+
+    # Verify Ground Truth truck styling with glowing amber-orange material
+    assert "0xff9f00" in html
+    assert "0xff6d00" in html
+    assert "emissiveIntensity: 0.65" in html
+    assert "opacity: 0.85" in html
+
+    # Verify procedural trees and boulders are completely eliminated
+    assert "trunkMat" not in html
+    assert "foliageMat" not in html
+    assert "boulderMat" not in html
+    assert "treesPlaced" not in html
+    assert "rocksPlaced" not in html
+
+
+def test_load_cargo_truck_fbx_b64_fallback(monkeypatch):
+    """Verifies that _load_cargo_truck_fbx_b64 returns empty string gracefully when no file exists."""
+    import src.viewer_3d as v3d
+
+    def _fake_isfile(path):
+        return False
+
+    monkeypatch.setattr("os.path.isfile", _fake_isfile)
+    result = v3d._load_cargo_truck_fbx_b64()
+    assert result == ""
+
 

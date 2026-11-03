@@ -5,12 +5,30 @@ Consumes a `Scene3DPayload` dictionary (defined in `.memory_bank/contracts/scene
 and exports a self-contained, single-file HTML5 + Three.js (`three@0.160.0`) WebGL application.
 """
 
+import base64
 import json
 import math
 import os
 from typing import Any, Dict
 
 import numpy as np
+
+
+def _load_cargo_truck_fbx_b64() -> str:
+    """Loads Peleng/assets/CargoTruck.fbx (or /Users/test/Desktop/CargoTruck.fbx) as a Base64 string."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidate_paths = [
+        os.path.join(repo_root, "assets", "CargoTruck.fbx"),
+        "/Users/test/Desktop/CargoTruck.fbx",
+    ]
+    for path in candidate_paths:
+        try:
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    return base64.b64encode(f.read()).decode("ascii")
+        except Exception:
+            continue
+    return ""
 
 
 def _sanitize_for_json(obj: Any) -> Any:
@@ -98,7 +116,9 @@ def export_3d_viewer_html(
     # Prevent accidental script tag termination inside embedded JSON
     payload_json = payload_json.replace("</script>", "<\\/script>")
 
+    fbx_b64 = _load_cargo_truck_fbx_b64()
     html_content = _HTML_TEMPLATE.replace("__SCENE_PAYLOAD_JSON__", payload_json)
+    html_content = html_content.replace("__CARGO_TRUCK_FBX_B64__", fbx_b64)
 
     out_dir = os.path.dirname(output_html_path)
     if out_dir:
@@ -683,7 +703,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           <input type="range" id="slider-pt-size" min="0.5" max="8.0" step="0.1" value="2.6" />
         </div>
         <label class="layer-item">
-          <span>3D Roadway &amp; Scenery</span>
+          <span>3D Roadway</span>
           <input type="checkbox" id="toggle-road" checked />
         </label>
         <label class="layer-item">
@@ -834,15 +854,19 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     </button>
   </footer>
 
-  <!-- Embedded Scene3DPayload Data -->
+  <!-- Embedded Scene3DPayload Data & CargoTruck.fbx Asset -->
   <script>
     window.SCENE_DATA = __SCENE_PAYLOAD_JSON__;
+  </script>
+  <script>
+    window.CARGO_TRUCK_FBX_B64 = "__CARGO_TRUCK_FBX_B64__";
   </script>
 
   <!-- Three.js Application Logic -->
   <script type="module">
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
     const SCENE_DATA = window.SCENE_DATA || {};
     const meta = SCENE_DATA.meta || {};
@@ -1297,78 +1321,100 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
     buildCameras();
 
-    // 4. Build Detailed 3D Anti-Aircraft Truck (SM_AA_track) + GT Ghost + Trajectory Ribbons
+    // 4. Build Detailed 3D CargoTruck (CargoTruck.fbx via FBXLoader.parse) + GT Truck + Trajectory Ribbons
+    function base64ToArrayBuffer(base64) {
+      const bin = atob(base64);
+      const len = bin.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes.buffer;
+    }
+
+    function parseCargoTruckFbx() {
+      const b64 = window.CARGO_TRUCK_FBX_B64 || '';
+      if (!b64 || b64.length < 64) return null;
+      const buf = base64ToArrayBuffer(b64);
+      const loader = new FBXLoader();
+      const fbxGroup = loader.parse(buf, '');
+      // CargoTruck.fbx is in cm (+Z forward, +Y up); scale 0.014 (~9.4m long) and rotate +90deg around Y to align +Z with +X forward
+      fbxGroup.scale.set(0.014, 0.014, 0.014);
+      fbxGroup.rotation.set(0, Math.PI / 2, 0);
+      return fbxGroup;
+    }
+
+    function fixFbxTruckMaterial(mat) {
+      if (!mat) return mat;
+      const cloned = mat.clone();
+      const mName = String(cloned.name || '').toLowerCase();
+      // Reset Blender 5.0 default white EmissiveColor [1,1,1] so diffuse colors render accurately
+      if (cloned.emissive) {
+        if (mName.includes('headlight')) {
+          cloned.emissive.set(0xf59e0b);
+          if ('emissiveIntensity' in cloned) cloned.emissiveIntensity = 0.8;
+        } else if (mName.includes('backlight')) {
+          cloned.emissive.set(0xef4444);
+          if ('emissiveIntensity' in cloned) cloned.emissiveIntensity = 0.8;
+        } else {
+          cloned.emissive.set(0x000000);
+          if ('emissiveIntensity' in cloned) cloned.emissiveIntensity = 0.0;
+        }
+      }
+      cloned.side = THREE.DoubleSide;
+      return cloned;
+    }
+
     function createAATruckMesh() {
       const group = new THREE.Group();
-      // Local coordinates: +X forward, +Y up, +Z right (total length ~11.2m, width ~3.0m, height ~3.6m)
-      const hullMat = new THREE.MeshStandardMaterial({
-        color: 0x1e293b,
-        roughness: 0.45,
-        metalness: 0.55
-      });
-      const accentMat = new THREE.MeshStandardMaterial({
-        color: 0x00f5d4,
-        emissive: 0x00f5d4,
-        emissiveIntensity: 0.35,
-        roughness: 0.3
-      });
-      const radarMat = new THREE.MeshStandardMaterial({
-        color: 0x38bdf8,
-        emissive: 0x0284c7,
-        emissiveIntensity: 0.4,
-        roughness: 0.25
-      });
-      const wheelMat = new THREE.MeshStandardMaterial({
-        color: 0x090d16,
-        roughness: 0.9
-      });
+      let loadedFbx = false;
+      try {
+        const fbxGroup = parseCargoTruckFbx();
+        if (fbxGroup) {
+          fbxGroup.traverse(child => {
+            if (child.isMesh) {
+              if (Array.isArray(child.material)) {
+                child.material = child.material.map(fixFbxTruckMaterial);
+              } else {
+                child.material = fixFbxTruckMaterial(child.material);
+              }
+            }
+          });
+          group.add(fbxGroup);
+          loadedFbx = true;
+        }
+      } catch (err) {
+        console.warn('FBXLoader fallback to procedural truck mesh:', err);
+      }
 
-      // Heavy flatbed chassis
-      const chassis = new THREE.Mesh(new THREE.BoxGeometry(11.2, 0.9, 2.9), hullMat);
-      chassis.position.set(0, 0.95, 0);
-      group.add(chassis);
+      if (!loadedFbx) {
+        const hullMat = new THREE.MeshStandardMaterial({
+          color: 0x1e293b,
+          roughness: 0.45,
+          metalness: 0.55
+        });
+        const accentMat = new THREE.MeshStandardMaterial({
+          color: 0x00f5d4,
+          emissive: 0x00f5d4,
+          emissiveIntensity: 0.35,
+          roughness: 0.3
+        });
+        const chassis = new THREE.Mesh(new THREE.BoxGeometry(9.4, 0.9, 2.8), hullMat);
+        chassis.position.set(0, 0.95, 0);
+        group.add(chassis);
+        const cab = new THREE.Mesh(new THREE.BoxGeometry(2.8, 1.85, 2.7), hullMat);
+        cab.position.set(3.2, 2.1, 0);
+        group.add(cab);
+        const visor = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.55, 2.4), accentMat);
+        visor.position.set(4.6, 2.45, 0);
+        group.add(visor);
+      }
 
-      // Armored forward cab (+X front)
-      const cab = new THREE.Mesh(new THREE.BoxGeometry(3.1, 1.85, 2.85), hullMat);
-      cab.position.set(3.85, 2.1, 0);
-      group.add(cab);
-
-      // Glowing windshield visor
-      const visor = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.55, 2.5), accentMat);
-      visor.position.set(5.38, 2.45, 0);
-      group.add(visor);
-
-      // Rear AA Turret base
-      const turretBase = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.35, 1.1, 16), hullMat);
-      turretBase.position.set(-2.1, 1.95, 0);
-      group.add(turretBase);
-
-      // AA Missile / Gun pods + Radar Dish
-      const radarMast = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.15, 2.2), radarMat);
-      radarMast.position.set(-2.1, 3.0, 0);
-      group.add(radarMast);
-
-      // 8 Wheels (4 axles)
-      const wheelGeom = new THREE.CylinderGeometry(0.62, 0.62, 0.45, 16);
-      wheelGeom.rotateX(Math.PI / 2);
-      const axleX = [-4.1, -1.6, 1.4, 3.9];
-      axleX.forEach(ax => {
-        const wLeft = new THREE.Mesh(wheelGeom, wheelMat);
-        wLeft.position.set(ax, 0.62, -1.55);
-        group.add(wLeft);
-
-        const wRight = new THREE.Mesh(wheelGeom, wheelMat);
-        wRight.position.set(ax, 0.62, 1.55);
-        group.add(wRight);
-      });
-
-      // Tactical neon outline box
-      const boxEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(11.4, 3.6, 3.1));
+      // Tactical neon outline box (SM_AA_track / CargoTruck)
+      const boxEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(9.6, 3.8, 3.2));
       const boxLines = new THREE.LineSegments(
         boxEdges,
         new THREE.LineBasicMaterial({ color: 0x00f5d4, transparent: true, opacity: 0.45 })
       );
-      boxLines.position.set(0, 1.85, 0);
+      boxLines.position.set(0, 1.9, 0);
       group.add(boxLines);
 
       return group;
@@ -1377,40 +1423,51 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     const truckMesh = createAATruckMesh();
     scene.add(truckMesh);
 
-    // Bold 3D Ground Truth Truck Model (Vivid Golden-Orange Armor + Bright Outline)
+    // Bold 3D Ground Truth Truck Model (Authentic CargoTruck.fbx in Vivid Golden-Orange + Bright Outline)
     function createGTTruckMesh() {
       const group = new THREE.Group();
       const gtArmorMat = new THREE.MeshStandardMaterial({
         color: 0xff9f00,
         emissive: 0xff6d00,
-        emissiveIntensity: 0.75,
+        emissiveIntensity: 0.65,
         roughness: 0.25,
         metalness: 0.4,
         transparent: true,
-        opacity: 0.88
+        opacity: 0.85,
+        side: THREE.DoubleSide
       });
-      const gtChassis = new THREE.Mesh(new THREE.BoxGeometry(11.2, 0.9, 2.9), gtArmorMat);
-      gtChassis.position.set(0, 0.95, 0);
-      group.add(gtChassis);
 
-      const gtCab = new THREE.Mesh(new THREE.BoxGeometry(3.1, 1.85, 2.85), gtArmorMat);
-      gtCab.position.set(3.85, 2.1, 0);
-      group.add(gtCab);
+      let loadedFbx = false;
+      try {
+        const fbxGroup = parseCargoTruckFbx();
+        if (fbxGroup) {
+          fbxGroup.traverse(child => {
+            if (child.isMesh) {
+              child.material = gtArmorMat;
+            }
+          });
+          group.add(fbxGroup);
+          loadedFbx = true;
+        }
+      } catch (err) {
+        console.warn('FBXLoader GT fallback to procedural truck mesh:', err);
+      }
 
-      const gtTurret = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.35, 1.1, 16), gtArmorMat);
-      gtTurret.position.set(-2.1, 1.95, 0);
-      group.add(gtTurret);
+      if (!loadedFbx) {
+        const gtChassis = new THREE.Mesh(new THREE.BoxGeometry(9.4, 0.9, 2.8), gtArmorMat);
+        gtChassis.position.set(0, 0.95, 0);
+        group.add(gtChassis);
+        const gtCab = new THREE.Mesh(new THREE.BoxGeometry(2.8, 1.85, 2.7), gtArmorMat);
+        gtCab.position.set(3.2, 2.1, 0);
+        group.add(gtCab);
+      }
 
-      const gtRadar = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.15, 2.2), gtArmorMat);
-      gtRadar.position.set(-2.1, 3.0, 0);
-      group.add(gtRadar);
-
-      const gtEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(11.5, 3.7, 3.15));
+      const gtEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(9.8, 3.9, 3.3));
       const gtOutline = new THREE.LineSegments(
         gtEdges,
         new THREE.LineBasicMaterial({ color: 0xffe600, transparent: true, opacity: 0.95 })
       );
-      gtOutline.position.set(0, 1.85, 0);
+      gtOutline.position.set(0, 1.95, 0);
       group.add(gtOutline);
       return group;
     }
@@ -1584,7 +1641,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
     buildTrajectories();
 
-    // 4b. Build 3D Roadway Ribbon, Centerline Markings & Valley Pine Trees / Boulders
+    // 4b. Build 3D Roadway Ribbon & Centerline Markings
     const roadGroup = new THREE.Group();
     scene.add(roadGroup);
 
@@ -1634,170 +1691,70 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
     function buildRoadAndScenery() {
       const activeCurve = roadBaseCurve || gtCurve || estCurve;
-      const roadSamplePts = [];
+      if (!activeCurve) return;
 
-      if (activeCurve) {
-        const numSamples = 220;
-        for (let i = 0; i <= numSamples; i++) {
-          roadSamplePts.push(activeCurve.getPoint(i / numSamples));
+      const numSamples = 220;
+
+      // Gravel shoulder bed (11.5m wide, lifted +0.10m)
+      const shoulderGeom = createRibbonGeometry(activeCurve, numSamples, 11.5, 0.10);
+      const shoulderMat = new THREE.MeshStandardMaterial({
+        color: 0x5c5346,
+        roughness: 0.92,
+        metalness: 0.05,
+        side: THREE.DoubleSide
+      });
+      roadGroup.add(new THREE.Mesh(shoulderGeom, shoulderMat));
+
+      // Dark asphalt roadbed (8.0m wide, lifted +0.18m)
+      const asphaltGeom = createRibbonGeometry(activeCurve, numSamples, 8.0, 0.18);
+      const asphaltMat = new THREE.MeshStandardMaterial({
+        color: 0x232730,
+        roughness: 0.78,
+        metalness: 0.12,
+        side: THREE.DoubleSide
+      });
+      roadGroup.add(new THREE.Mesh(asphaltGeom, asphaltMat));
+
+      // Dashed bright yellow-white centerline & edge lines
+      const dashPositions = [];
+      const edgePositions = [];
+      for (let i = 0; i < numSamples; i++) {
+        const p0 = activeCurve.getPoint(i / numSamples);
+        const p1 = activeCurve.getPoint((i + 1) / numSamples);
+        const tan = activeCurve.getTangent(i / numSamples);
+        const right = new THREE.Vector3(-tan.z, 0, tan.x);
+        if (right.lengthSq() < 1e-6) right.set(0, 0, 1);
+        else right.normalize();
+
+        if (i % 2 === 0) {
+          dashPositions.push(p0.x, p0.y + 0.25, p0.z, p1.x, p1.y + 0.25, p1.z);
         }
-
-        // Gravel shoulder bed (11.5m wide, lifted +0.10m)
-        const shoulderGeom = createRibbonGeometry(activeCurve, numSamples, 11.5, 0.10);
-        const shoulderMat = new THREE.MeshStandardMaterial({
-          color: 0x5c5346,
-          roughness: 0.92,
-          metalness: 0.05,
-          side: THREE.DoubleSide
-        });
-        roadGroup.add(new THREE.Mesh(shoulderGeom, shoulderMat));
-
-        // Dark asphalt roadbed (8.0m wide, lifted +0.18m)
-        const asphaltGeom = createRibbonGeometry(activeCurve, numSamples, 8.0, 0.18);
-        const asphaltMat = new THREE.MeshStandardMaterial({
-          color: 0x232730,
-          roughness: 0.78,
-          metalness: 0.12,
-          side: THREE.DoubleSide
-        });
-        roadGroup.add(new THREE.Mesh(asphaltGeom, asphaltMat));
-
-        // Dashed bright yellow-white centerline & edge lines
-        const dashPositions = [];
-        const edgePositions = [];
-        for (let i = 0; i < numSamples; i++) {
-          const p0 = activeCurve.getPoint(i / numSamples);
-          const p1 = activeCurve.getPoint((i + 1) / numSamples);
-          const tan = activeCurve.getTangent(i / numSamples);
-          const right = new THREE.Vector3(-tan.z, 0, tan.x);
-          if (right.lengthSq() < 1e-6) right.set(0, 0, 1);
-          else right.normalize();
-
-          if (i % 2 === 0) {
-            dashPositions.push(p0.x, p0.y + 0.25, p0.z, p1.x, p1.y + 0.25, p1.z);
-          }
-          const edgeOffset = 3.65;
-          edgePositions.push(
-            p0.x - right.x * edgeOffset, p0.y + 0.22, p0.z - right.z * edgeOffset,
-            p1.x - right.x * edgeOffset, p1.y + 0.22, p1.z - right.z * edgeOffset,
-            p0.x + right.x * edgeOffset, p0.y + 0.22, p0.z + right.z * edgeOffset,
-            p1.x + right.x * edgeOffset, p1.y + 0.22, p1.z + right.z * edgeOffset
-          );
-        }
-
-        const dashGeom = new THREE.BufferGeometry();
-        dashGeom.setAttribute('position', new THREE.Float32BufferAttribute(dashPositions, 3));
-        roadGroup.add(
-          new THREE.LineSegments(
-            dashGeom,
-            new THREE.LineBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.85 })
-          )
-        );
-
-        const edgeGeom = new THREE.BufferGeometry();
-        edgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
-        roadGroup.add(
-          new THREE.LineSegments(
-            edgeGeom,
-            new THREE.LineBasicMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.55 })
-          )
+        const edgeOffset = 3.65;
+        edgePositions.push(
+          p0.x - right.x * edgeOffset, p0.y + 0.22, p0.z - right.z * edgeOffset,
+          p1.x - right.x * edgeOffset, p1.y + 0.22, p1.z - right.z * edgeOffset,
+          p0.x + right.x * edgeOffset, p0.y + 0.22, p0.z + right.z * edgeOffset,
+          p1.x + right.x * edgeOffset, p1.y + 0.22, p1.z + right.z * edgeOffset
         );
       }
 
-      // Deterministic PRNG for 3D Valley Conifer Trees & Boulders
-      let seed = 133742;
-      function nextRand() {
-        seed = (seed * 1664525 + 1013904223) >>> 0;
-        return seed / 4294967296.0;
-      }
+      const dashGeom = new THREE.BufferGeometry();
+      dashGeom.setAttribute('position', new THREE.Float32BufferAttribute(dashPositions, 3));
+      roadGroup.add(
+        new THREE.LineSegments(
+          dashGeom,
+          new THREE.LineBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.85 })
+        )
+      );
 
-      const camPositions = Object.values(cameraRigMap).map(r => r.posThree);
-      function hasClearance(x3, z3) {
-        for (let i = 0; i < roadSamplePts.length; i += 2) {
-          const dx = x3 - roadSamplePts[i].x;
-          const dz = z3 - roadSamplePts[i].z;
-          if (dx * dx + dz * dz < 14.0 * 14.0) return false;
-        }
-        for (let i = 0; i < camPositions.length; i++) {
-          const dx = x3 - camPositions[i].x;
-          const dz = z3 - camPositions[i].z;
-          if (dx * dx + dz * dz < 15.0 * 15.0) return false;
-        }
-        return true;
-      }
-
-      const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3525, roughness: 0.9 });
-      const foliageMatDark = new THREE.MeshStandardMaterial({ color: 0x2d4c2b, roughness: 0.85 });
-      const foliageMatLight = new THREE.MeshStandardMaterial({ color: 0x3a5f32, roughness: 0.85 });
-      const boulderMat = new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.88, metalness: 0.1 });
-
-      const trunkGeom = new THREE.CylinderGeometry(0.18, 0.28, 1.0, 6);
-      const coneGeom = new THREE.ConeGeometry(1.0, 1.0, 7);
-      const rockGeom = new THREE.DodecahedronGeometry(1.0, 0);
-
-      let treesPlaced = 0;
-      let attempts = 0;
-      while (treesPlaced < 160 && attempts < 900) {
-        attempts++;
-        let x3, z3;
-        if (roadSamplePts.length > 0 && nextRand() < 0.72) {
-          const rp = roadSamplePts[Math.floor(nextRand() * roadSamplePts.length)];
-          const side = nextRand() < 0.5 ? -1.0 : 1.0;
-          const dist = 16.0 + nextRand() * 95.0;
-          const angle = nextRand() * Math.PI * 2.0;
-          x3 = rp.x + Math.cos(angle) * dist * side;
-          z3 = rp.z + Math.sin(angle) * dist;
-        } else {
-          x3 = (nextRand() - 0.5) * 520.0;
-          z3 = (nextRand() - 0.5) * 340.0;
-        }
-        if (!hasClearance(x3, z3)) continue;
-
-        const yGround = sampleTerrainYThree(x3, z3);
-        const treeH = 4.5 + nextRand() * 5.0;
-        const radius = 1.3 + nextRand() * 1.1;
-
-        const treeGrp = new THREE.Group();
-        treeGrp.position.set(x3, yGround, z3);
-
-        const trunk = new THREE.Mesh(trunkGeom, trunkMat);
-        trunk.scale.set(1, treeH * 0.28, 1);
-        trunk.position.y = treeH * 0.14;
-        treeGrp.add(trunk);
-
-        const fMat = nextRand() < 0.5 ? foliageMatDark : foliageMatLight;
-        const c1 = new THREE.Mesh(coneGeom, fMat);
-        c1.scale.set(radius, treeH * 0.55, radius);
-        c1.position.y = treeH * 0.45;
-        treeGrp.add(c1);
-
-        const c2 = new THREE.Mesh(coneGeom, fMat);
-        c2.scale.set(radius * 0.75, treeH * 0.45, radius * 0.75);
-        c2.position.y = treeH * 0.72;
-        treeGrp.add(c2);
-
-        roadGroup.add(treeGrp);
-        treesPlaced++;
-      }
-
-      let rocksPlaced = 0;
-      attempts = 0;
-      while (rocksPlaced < 50 && attempts < 300) {
-        attempts++;
-        const x3 = (nextRand() - 0.5) * 480.0;
-        const z3 = (nextRand() - 0.5) * 320.0;
-        if (!hasClearance(x3, z3)) continue;
-        const yGround = sampleTerrainYThree(x3, z3);
-        const rx = 0.8 + nextRand() * 1.8;
-        const ry = 0.6 + nextRand() * 1.2;
-        const rz = 0.8 + nextRand() * 1.7;
-        const rock = new THREE.Mesh(rockGeom, boulderMat);
-        rock.scale.set(rx, ry, rz);
-        rock.position.set(x3, yGround + ry * 0.35, z3);
-        rock.rotation.set(nextRand() * 3.0, nextRand() * 3.0, nextRand() * 3.0);
-        roadGroup.add(rock);
-        rocksPlaced++;
-      }
+      const edgeGeom = new THREE.BufferGeometry();
+      edgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
+      roadGroup.add(
+        new THREE.LineSegments(
+          edgeGeom,
+          new THREE.LineBasicMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.55 })
+        )
+      );
     }
 
     buildRoadAndScenery();
