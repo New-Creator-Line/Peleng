@@ -218,3 +218,25 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Machine Learning weights, checkpoints and training runs
+*.pt
+*.pth
+*.onnx
+*.engine
+*.bin
+weights/
+runs/
+
+# Training datasets, zip archives and debug images
+peleng.v1i.yolov8/
+*.zip
+debug_*.jpg
+
+# Large video outputs
+results/videos/
+
+# Compiled C++ Python extensions and build artifacts
+*.pyd
+build/
