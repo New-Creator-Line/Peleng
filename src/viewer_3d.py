@@ -683,6 +683,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           <input type="range" id="slider-pt-size" min="0.5" max="8.0" step="0.1" value="2.6" />
         </div>
         <label class="layer-item">
+          <span>3D Roadway &amp; Scenery</span>
+          <input type="checkbox" id="toggle-road" checked />
+        </label>
+        <label class="layer-item">
           <span>Camera Frustums &amp; Badges</span>
           <input type="checkbox" id="toggle-frustums" checked />
         </label>
@@ -698,6 +702,23 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           <span>Ground Truth Trajectory</span>
           <input type="checkbox" id="toggle-gt-traj" checked />
         </label>
+        <div class="slider-row">
+          <div style="display:flex;justify-content:space-between;">
+            <span>Толщина линий пути</span>
+            <span id="traj-width-label">0.60 m</span>
+          </div>
+          <input type="range" id="slider-traj-width" min="0.15" max="2.50" step="0.05" value="0.60" />
+        </div>
+        <div class="slider-row">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span>Цвета линий пути</span>
+          </div>
+          <select class="speed-select" id="select-traj-style" style="width:100%;">
+            <option value="contrast" selected>Контраст: Чёрно-красный / Ярко-оранжевый (GT)</option>
+            <option value="neon">Неон: Бирюзовый / Ярко-оранжевый (GT)</option>
+            <option value="vivid">Яркий: Красный / Изумрудный (GT)</option>
+          </select>
+        </div>
       </div>
     </div>
 
@@ -705,12 +726,12 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="section-title">Legend</div>
       <div class="layer-list" style="gap: 5px;">
         <div class="legend-row">
-          <span class="legend-swatch" style="background:#00f5d4;"></span>
+          <span class="legend-swatch" id="swatch-est" style="background:#111827;border:1.5px solid #d90429;"></span>
           <span>Predicted 3D Path &amp; SM_AA_track</span>
         </div>
         <div class="legend-row" id="legend-gt-row">
-          <span class="legend-swatch" style="background:#f59e0b;"></span>
-          <span>Ground Truth 3D Path (UE5)</span>
+          <span class="legend-swatch" id="swatch-gt" style="background:#ff9f00;"></span>
+          <span>Ground Truth 3D Path &amp; Truck (UE5)</span>
         </div>
         <div class="legend-row">
           <span class="legend-swatch" style="background:#38bdf8;"></span>
@@ -839,7 +860,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
      * centered at meta.origin_center_cm [cx, cy, cz] into Three.js Right-Handed meters (1 unit = 1m):
      *   x3 = (x_ue - cx) / 100.0
      *   y3 = (z_ue - cz) / 100.0
-     *   z3 = -(y_ue - cy) / 100.0
+     *   z3 = (y_ue - cy) / 100.0
      */
     function ueToThree(posCm) {
       const x_ue = Number(posCm[0] || 0.0);
@@ -847,7 +868,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       const z_ue = Number(posCm[2] || 0.0);
       const x3 = (x_ue - cx) / 100.0;
       const y3 = (z_ue - cz) / 100.0;
-      const z3 = -(y_ue - cy) / 100.0;
+      const z3 = (y_ue - cy) / 100.0;
       return new THREE.Vector3(x3, y3, z3);
     }
 
@@ -855,7 +876,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       const dx = Number(dirVec[0] || 0.0);
       const dy = Number(dirVec[1] || 0.0);
       const dz = Number(dirVec[2] || 0.0);
-      return new THREE.Vector3(dx, dz, -dy).normalize();
+      return new THREE.Vector3(dx, dz, dy).normalize();
     }
 
     // Initialize Mode & Static Accuracy Metrics (with defensive element guards)
@@ -1065,8 +1086,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           const i10 = r * cols + (c + 1);
           const i01 = (r + 1) * cols + c;
           const i11 = (r + 1) * cols + (c + 1);
-          indices.push(i00, i01, i10);
-          indices.push(i10, i01, i11);
+          indices.push(i00, i10, i01);
+          indices.push(i10, i11, i01);
         }
       }
 
@@ -1174,7 +1195,38 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       return arr;
     }
 
+    function sampleTerrainYThree(x3, z3) {
+      const tm = SCENE_DATA.terrain_mesh || {};
+      const rows = Number(tm.rows || 0);
+      const cols = Number(tm.cols || 0);
+      const xGrid = tm.x_grid_cm || [];
+      const yGrid = tm.y_grid_cm || [];
+      const zMatrix = tm.z_matrix_cm || [];
+      if (rows < 2 || cols < 2 || !xGrid.length || !yGrid.length) return 0.0;
+
+      const x_ue = x3 * 100.0 + cx;
+      const y_ue = z3 * 100.0 + cy;
+      const xMin = xGrid[0], xMax = xGrid[cols - 1];
+      const yMin = yGrid[0], yMax = yGrid[rows - 1];
+      const u = Math.max(0, Math.min(1, (x_ue - xMin) / Math.max(1.0, xMax - xMin))) * (cols - 1);
+      const v = Math.max(0, Math.min(1, (y_ue - yMin) / Math.max(1.0, yMax - yMin))) * (rows - 1);
+      const c0 = Math.floor(u), c1 = Math.min(cols - 1, c0 + 1);
+      const r0 = Math.floor(v), r1 = Math.min(rows - 1, r0 + 1);
+      const tx = u - c0, ty = v - r0;
+      const z00 = (zMatrix[r0] && zMatrix[r0][c0] !== undefined) ? zMatrix[r0][c0] : cz;
+      const z10 = (zMatrix[r0] && zMatrix[r0][c1] !== undefined) ? zMatrix[r0][c1] : cz;
+      const z01 = (zMatrix[r1] && zMatrix[r1][c0] !== undefined) ? zMatrix[r1][c0] : cz;
+      const z11 = (zMatrix[r1] && zMatrix[r1][c1] !== undefined) ? zMatrix[r1][c1] : cz;
+      const z_ue = (1 - tx) * (1 - ty) * z00 + tx * (1 - ty) * z10 + (1 - tx) * ty * z01 + tx * ty * z11;
+      return (z_ue - cz) / 100.0;
+    }
+
     function buildCameras() {
+      const pylonMat = new THREE.MeshStandardMaterial({
+        color: 0x334155,
+        roughness: 0.6,
+        metalness: 0.65
+      });
       Object.keys(camerasData).forEach(camKey => {
         const camInfo = camerasData[camKey];
         const posThree = ueToThree(camInfo.pos_cm || [0, 0, 0]);
@@ -1184,11 +1236,27 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         const rigGroup = new THREE.Group();
         camerasGroup.add(rigGroup);
 
-        // Camera housing marker
-        const sphereGeom = new THREE.SphereGeometry(1.8, 16, 16);
-        const sphereMat = new THREE.MeshBasicMaterial({ color: accentColor });
-        const markerMesh = new THREE.Mesh(sphereGeom, sphereMat);
+        // 3D Vertical Pylon / Support Tower grounding camera to terrain
+        const groundY = sampleTerrainYThree(posThree.x, posThree.z);
+        const towerHeight = Math.max(8.0, posThree.y - groundY + 4.0);
+        const towerGeom = new THREE.CylinderGeometry(0.35, 0.65, towerHeight, 8);
+        const towerMesh = new THREE.Mesh(towerGeom, pylonMat);
+        towerMesh.position.set(posThree.x, posThree.y - towerHeight * 0.5, posThree.z);
+        rigGroup.add(towerMesh);
+
+        // Directional 3D Camera Housing Box + Glowing Lens Marker
+        const housingGeom = new THREE.BoxGeometry(2.6, 1.5, 1.6);
+        const housingMat = new THREE.MeshStandardMaterial({
+          color: 0x0f172a,
+          emissive: accentColor,
+          emissiveIntensity: 0.45,
+          roughness: 0.3,
+          metalness: 0.7
+        });
+        const markerMesh = new THREE.Mesh(housingGeom, housingMat);
         markerMesh.position.copy(posThree);
+        const fwdDir = ueDirToThree(camInfo.forward || [1, 0, 0]);
+        markerMesh.lookAt(posThree.clone().add(fwdDir));
         rigGroup.add(markerMesh);
 
         // Frustum wireframe lines
@@ -1309,72 +1377,430 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     const truckMesh = createAATruckMesh();
     scene.add(truckMesh);
 
-    // Ground Truth Ghost Marker (Amber)
-    const gtGhostGroup = new THREE.Group();
-    const gtBoxGeom = new THREE.BoxGeometry(11.2, 3.4, 3.0);
-    const gtGhostMesh = new THREE.Mesh(
-      gtBoxGeom,
-      new THREE.MeshBasicMaterial({
-        color: 0xf59e0b,
-        wireframe: true,
+    // Bold 3D Ground Truth Truck Model (Vivid Golden-Orange Armor + Bright Outline)
+    function createGTTruckMesh() {
+      const group = new THREE.Group();
+      const gtArmorMat = new THREE.MeshStandardMaterial({
+        color: 0xff9f00,
+        emissive: 0xff6d00,
+        emissiveIntensity: 0.75,
+        roughness: 0.25,
+        metalness: 0.4,
         transparent: true,
-        opacity: 0.65
-      })
-    );
-    gtGhostMesh.position.set(0, 1.7, 0);
-    gtGhostGroup.add(gtGhostMesh);
+        opacity: 0.88
+      });
+      const gtChassis = new THREE.Mesh(new THREE.BoxGeometry(11.2, 0.9, 2.9), gtArmorMat);
+      gtChassis.position.set(0, 0.95, 0);
+      group.add(gtChassis);
+
+      const gtCab = new THREE.Mesh(new THREE.BoxGeometry(3.1, 1.85, 2.85), gtArmorMat);
+      gtCab.position.set(3.85, 2.1, 0);
+      group.add(gtCab);
+
+      const gtTurret = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.35, 1.1, 16), gtArmorMat);
+      gtTurret.position.set(-2.1, 1.95, 0);
+      group.add(gtTurret);
+
+      const gtRadar = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.15, 2.2), gtArmorMat);
+      gtRadar.position.set(-2.1, 3.0, 0);
+      group.add(gtRadar);
+
+      const gtEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(11.5, 3.7, 3.15));
+      const gtOutline = new THREE.LineSegments(
+        gtEdges,
+        new THREE.LineBasicMaterial({ color: 0xffe600, transparent: true, opacity: 0.95 })
+      );
+      gtOutline.position.set(0, 1.85, 0);
+      group.add(gtOutline);
+      return group;
+    }
+
+    const gtGhostGroup = new THREE.Group();
+    gtGhostGroup.add(createGTTruckMesh());
     gtGhostGroup.visible = hasGT;
     scene.add(gtGhostGroup);
 
-    // Trajectory Ribbons (Predicted #00f5d4 & Ground Truth #f59e0b)
+    // 3D Volumetric Tube Trajectories with Adjustable Thickness & Color Palette
     let estTrajectoryLine = null;
     let gtTrajectoryLine = null;
+    let estCurve = null;
+    let gtCurve = null;
+    let roadBaseCurve = null;
+    let currentTrajRadius = 0.60;
+    let currentTrajStyle = 'contrast';
+
+    const TRAJ_STYLES = {
+      contrast: {
+        estColor: 0x111827,
+        estEmissive: 0xd90429,
+        estEmissiveIntensity: 0.45,
+        gtColor: 0xff9f00,
+        gtEmissive: 0xff6d00,
+        gtEmissiveIntensity: 0.75,
+        swatchEstBg: '#111827',
+        swatchEstBorder: '1.5px solid #d90429',
+        swatchGtBg: '#ff9f00'
+      },
+      neon: {
+        estColor: 0x00f5d4,
+        estEmissive: 0x00b4d8,
+        estEmissiveIntensity: 0.55,
+        gtColor: 0xff9f00,
+        gtEmissive: 0xff6d00,
+        gtEmissiveIntensity: 0.75,
+        swatchEstBg: '#00f5d4',
+        swatchEstBorder: 'none',
+        swatchGtBg: '#ff9f00'
+      },
+      vivid: {
+        estColor: 0xef4444,
+        estEmissive: 0xb91c1c,
+        estEmissiveIntensity: 0.55,
+        gtColor: 0x10b981,
+        gtEmissive: 0x059669,
+        gtEmissiveIntensity: 0.65,
+        swatchEstBg: '#ef4444',
+        swatchEstBorder: 'none',
+        swatchGtBg: '#10b981'
+      }
+    };
+
+    function deduplicatePoints(pts, minDist = 0.05) {
+      const out = [];
+      for (let i = 0; i < pts.length; i++) {
+        if (out.length === 0 || pts[i].distanceTo(out[out.length - 1]) >= minDist) {
+          out.push(pts[i]);
+        }
+      }
+      if (out.length === 1 && pts.length >= 2) {
+        out.push(pts[pts.length - 1].clone().add(new THREE.Vector3(0.1, 0, 0.1)));
+      }
+      return out;
+    }
+
+    function rebuildTrajectories(radiusM, styleKey) {
+      const style = TRAJ_STYLES[styleKey] || TRAJ_STYLES.contrast;
+      const estVis = document.getElementById('toggle-est-traj')
+        ? document.getElementById('toggle-est-traj').checked
+        : true;
+      const gtVis = document.getElementById('toggle-gt-traj')
+        ? document.getElementById('toggle-gt-traj').checked
+        : true;
+
+      if (estTrajectoryLine) {
+        scene.remove(estTrajectoryLine);
+        if (estTrajectoryLine.geometry) estTrajectoryLine.geometry.dispose();
+        if (estTrajectoryLine.material) estTrajectoryLine.material.dispose();
+        estTrajectoryLine = null;
+      }
+      if (gtTrajectoryLine) {
+        scene.remove(gtTrajectoryLine);
+        if (gtTrajectoryLine.geometry) gtTrajectoryLine.geometry.dispose();
+        if (gtTrajectoryLine.material) gtTrajectoryLine.material.dispose();
+        gtTrajectoryLine = null;
+      }
+
+      if (estCurve) {
+        const tubularSegs = Math.min(360, Math.max(32, estCurve.points.length * 2));
+        const geom = new THREE.TubeGeometry(estCurve, tubularSegs, radiusM, 8, false);
+        const mat = new THREE.MeshStandardMaterial({
+          color: style.estColor,
+          emissive: style.estEmissive,
+          emissiveIntensity: style.estEmissiveIntensity,
+          roughness: 0.25,
+          metalness: 0.35
+        });
+        estTrajectoryLine = new THREE.Mesh(geom, mat);
+        estTrajectoryLine.visible = estVis;
+        scene.add(estTrajectoryLine);
+      }
+
+      if (hasGT && gtCurve) {
+        const tubularSegs = Math.min(360, Math.max(32, gtCurve.points.length * 2));
+        const geom = new THREE.TubeGeometry(gtCurve, tubularSegs, radiusM * 0.92, 8, false);
+        const mat = new THREE.MeshStandardMaterial({
+          color: style.gtColor,
+          emissive: style.gtEmissive,
+          emissiveIntensity: style.gtEmissiveIntensity,
+          roughness: 0.2,
+          metalness: 0.3,
+          transparent: true,
+          opacity: 0.92
+        });
+        gtTrajectoryLine = new THREE.Mesh(geom, mat);
+        gtTrajectoryLine.visible = gtVis;
+        scene.add(gtTrajectoryLine);
+      }
+
+      const swEst = document.getElementById('swatch-est');
+      if (swEst) {
+        swEst.style.background = style.swatchEstBg;
+        swEst.style.border = style.swatchEstBorder;
+      }
+      const swGt = document.getElementById('swatch-gt');
+      if (swGt) {
+        swGt.style.background = style.swatchGtBg;
+      }
+    }
 
     function buildTrajectories() {
       if (!frames.length) return;
 
-      const estPts = [];
-      const gtPts = [];
+      const rawEst = [];
+      const rawGt = [];
+      const rawRoad = [];
 
       frames.forEach(f => {
         if (f.est_pos_cm) {
           const p = ueToThree(f.est_pos_cm);
-          p.y += 0.35; // Lift slightly above road surface
-          estPts.push(p);
+          rawEst.push(new THREE.Vector3(p.x, p.y + 0.55, p.z));
+          if (!hasGT || !f.gt_pos_cm) {
+            rawRoad.push(new THREE.Vector3(p.x, p.y, p.z));
+          }
         }
         if (hasGT && f.gt_pos_cm) {
           const g = ueToThree(f.gt_pos_cm);
-          g.y += 0.30;
-          gtPts.push(g);
+          rawGt.push(new THREE.Vector3(g.x, g.y + 0.48, g.z));
+          rawRoad.push(new THREE.Vector3(g.x, g.y, g.z));
         }
       });
 
-      if (estPts.length >= 2) {
-        const geom = new THREE.BufferGeometry().setFromPoints(estPts);
-        const mat = new THREE.LineBasicMaterial({
-          color: 0x00f5d4,
-          linewidth: 2,
-          transparent: true,
-          opacity: 0.92
-        });
-        estTrajectoryLine = new THREE.Line(geom, mat);
-        scene.add(estTrajectoryLine);
+      const cleanEst = deduplicatePoints(rawEst);
+      const cleanGt = deduplicatePoints(rawGt);
+      const cleanRoad = deduplicatePoints(rawRoad, 0.25);
+
+      if (cleanEst.length >= 2) {
+        estCurve = new THREE.CatmullRomCurve3(cleanEst);
+      }
+      if (hasGT && cleanGt.length >= 2) {
+        gtCurve = new THREE.CatmullRomCurve3(cleanGt);
+      }
+      if (cleanRoad.length >= 2) {
+        roadBaseCurve = new THREE.CatmullRomCurve3(cleanRoad);
       }
 
-      if (hasGT && gtPts.length >= 2) {
-        const geom = new THREE.BufferGeometry().setFromPoints(gtPts);
-        const mat = new THREE.LineBasicMaterial({
-          color: 0xf59e0b,
-          linewidth: 2,
-          transparent: true,
-          opacity: 0.78
-        });
-        gtTrajectoryLine = new THREE.Line(geom, mat);
-        scene.add(gtTrajectoryLine);
-      }
+      rebuildTrajectories(currentTrajRadius, currentTrajStyle);
     }
 
     buildTrajectories();
+
+    // 4b. Build 3D Roadway Ribbon, Centerline Markings & Valley Pine Trees / Boulders
+    const roadGroup = new THREE.Group();
+    scene.add(roadGroup);
+
+    function createRibbonGeometry(curve, samples, widthM, yLiftM) {
+      const positions = new Float32Array((samples + 1) * 2 * 3);
+      const indices = [];
+      for (let i = 0; i <= samples; i++) {
+        const t = i / samples;
+        const pt = curve.getPoint(t);
+        const tan = curve.getTangent(t);
+        const right = new THREE.Vector3(-tan.z, 0, tan.x);
+        if (right.lengthSq() < 1e-6) right.set(0, 0, 1);
+        else right.normalize();
+
+        const halfW = widthM * 0.5;
+        const lx = pt.x - right.x * halfW;
+        const ly = pt.y + yLiftM;
+        const lz = pt.z - right.z * halfW;
+
+        const rx = pt.x + right.x * halfW;
+        const ry = pt.y + yLiftM;
+        const rz = pt.z + right.z * halfW;
+
+        const base = i * 6;
+        positions[base] = lx;
+        positions[base + 1] = ly;
+        positions[base + 2] = lz;
+        positions[base + 3] = rx;
+        positions[base + 4] = ry;
+        positions[base + 5] = rz;
+
+        if (i < samples) {
+          const v0 = i * 2;
+          const v1 = v0 + 1;
+          const v2 = v0 + 2;
+          const v3 = v0 + 3;
+          indices.push(v0, v2, v1);
+          indices.push(v1, v2, v3);
+        }
+      }
+      const geom = new THREE.BufferGeometry();
+      geom.setIndex(indices);
+      geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geom.computeVertexNormals();
+      return geom;
+    }
+
+    function buildRoadAndScenery() {
+      const activeCurve = roadBaseCurve || gtCurve || estCurve;
+      const roadSamplePts = [];
+
+      if (activeCurve) {
+        const numSamples = 220;
+        for (let i = 0; i <= numSamples; i++) {
+          roadSamplePts.push(activeCurve.getPoint(i / numSamples));
+        }
+
+        // Gravel shoulder bed (11.5m wide, lifted +0.10m)
+        const shoulderGeom = createRibbonGeometry(activeCurve, numSamples, 11.5, 0.10);
+        const shoulderMat = new THREE.MeshStandardMaterial({
+          color: 0x5c5346,
+          roughness: 0.92,
+          metalness: 0.05,
+          side: THREE.DoubleSide
+        });
+        roadGroup.add(new THREE.Mesh(shoulderGeom, shoulderMat));
+
+        // Dark asphalt roadbed (8.0m wide, lifted +0.18m)
+        const asphaltGeom = createRibbonGeometry(activeCurve, numSamples, 8.0, 0.18);
+        const asphaltMat = new THREE.MeshStandardMaterial({
+          color: 0x232730,
+          roughness: 0.78,
+          metalness: 0.12,
+          side: THREE.DoubleSide
+        });
+        roadGroup.add(new THREE.Mesh(asphaltGeom, asphaltMat));
+
+        // Dashed bright yellow-white centerline & edge lines
+        const dashPositions = [];
+        const edgePositions = [];
+        for (let i = 0; i < numSamples; i++) {
+          const p0 = activeCurve.getPoint(i / numSamples);
+          const p1 = activeCurve.getPoint((i + 1) / numSamples);
+          const tan = activeCurve.getTangent(i / numSamples);
+          const right = new THREE.Vector3(-tan.z, 0, tan.x);
+          if (right.lengthSq() < 1e-6) right.set(0, 0, 1);
+          else right.normalize();
+
+          if (i % 2 === 0) {
+            dashPositions.push(p0.x, p0.y + 0.25, p0.z, p1.x, p1.y + 0.25, p1.z);
+          }
+          const edgeOffset = 3.65;
+          edgePositions.push(
+            p0.x - right.x * edgeOffset, p0.y + 0.22, p0.z - right.z * edgeOffset,
+            p1.x - right.x * edgeOffset, p1.y + 0.22, p1.z - right.z * edgeOffset,
+            p0.x + right.x * edgeOffset, p0.y + 0.22, p0.z + right.z * edgeOffset,
+            p1.x + right.x * edgeOffset, p1.y + 0.22, p1.z + right.z * edgeOffset
+          );
+        }
+
+        const dashGeom = new THREE.BufferGeometry();
+        dashGeom.setAttribute('position', new THREE.Float32BufferAttribute(dashPositions, 3));
+        roadGroup.add(
+          new THREE.LineSegments(
+            dashGeom,
+            new THREE.LineBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.85 })
+          )
+        );
+
+        const edgeGeom = new THREE.BufferGeometry();
+        edgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
+        roadGroup.add(
+          new THREE.LineSegments(
+            edgeGeom,
+            new THREE.LineBasicMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.55 })
+          )
+        );
+      }
+
+      // Deterministic PRNG for 3D Valley Conifer Trees & Boulders
+      let seed = 133742;
+      function nextRand() {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return seed / 4294967296.0;
+      }
+
+      const camPositions = Object.values(cameraRigMap).map(r => r.posThree);
+      function hasClearance(x3, z3) {
+        for (let i = 0; i < roadSamplePts.length; i += 2) {
+          const dx = x3 - roadSamplePts[i].x;
+          const dz = z3 - roadSamplePts[i].z;
+          if (dx * dx + dz * dz < 14.0 * 14.0) return false;
+        }
+        for (let i = 0; i < camPositions.length; i++) {
+          const dx = x3 - camPositions[i].x;
+          const dz = z3 - camPositions[i].z;
+          if (dx * dx + dz * dz < 15.0 * 15.0) return false;
+        }
+        return true;
+      }
+
+      const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3525, roughness: 0.9 });
+      const foliageMatDark = new THREE.MeshStandardMaterial({ color: 0x2d4c2b, roughness: 0.85 });
+      const foliageMatLight = new THREE.MeshStandardMaterial({ color: 0x3a5f32, roughness: 0.85 });
+      const boulderMat = new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.88, metalness: 0.1 });
+
+      const trunkGeom = new THREE.CylinderGeometry(0.18, 0.28, 1.0, 6);
+      const coneGeom = new THREE.ConeGeometry(1.0, 1.0, 7);
+      const rockGeom = new THREE.DodecahedronGeometry(1.0, 0);
+
+      let treesPlaced = 0;
+      let attempts = 0;
+      while (treesPlaced < 160 && attempts < 900) {
+        attempts++;
+        let x3, z3;
+        if (roadSamplePts.length > 0 && nextRand() < 0.72) {
+          const rp = roadSamplePts[Math.floor(nextRand() * roadSamplePts.length)];
+          const side = nextRand() < 0.5 ? -1.0 : 1.0;
+          const dist = 16.0 + nextRand() * 95.0;
+          const angle = nextRand() * Math.PI * 2.0;
+          x3 = rp.x + Math.cos(angle) * dist * side;
+          z3 = rp.z + Math.sin(angle) * dist;
+        } else {
+          x3 = (nextRand() - 0.5) * 520.0;
+          z3 = (nextRand() - 0.5) * 340.0;
+        }
+        if (!hasClearance(x3, z3)) continue;
+
+        const yGround = sampleTerrainYThree(x3, z3);
+        const treeH = 4.5 + nextRand() * 5.0;
+        const radius = 1.3 + nextRand() * 1.1;
+
+        const treeGrp = new THREE.Group();
+        treeGrp.position.set(x3, yGround, z3);
+
+        const trunk = new THREE.Mesh(trunkGeom, trunkMat);
+        trunk.scale.set(1, treeH * 0.28, 1);
+        trunk.position.y = treeH * 0.14;
+        treeGrp.add(trunk);
+
+        const fMat = nextRand() < 0.5 ? foliageMatDark : foliageMatLight;
+        const c1 = new THREE.Mesh(coneGeom, fMat);
+        c1.scale.set(radius, treeH * 0.55, radius);
+        c1.position.y = treeH * 0.45;
+        treeGrp.add(c1);
+
+        const c2 = new THREE.Mesh(coneGeom, fMat);
+        c2.scale.set(radius * 0.75, treeH * 0.45, radius * 0.75);
+        c2.position.y = treeH * 0.72;
+        treeGrp.add(c2);
+
+        roadGroup.add(treeGrp);
+        treesPlaced++;
+      }
+
+      let rocksPlaced = 0;
+      attempts = 0;
+      while (rocksPlaced < 50 && attempts < 300) {
+        attempts++;
+        const x3 = (nextRand() - 0.5) * 480.0;
+        const z3 = (nextRand() - 0.5) * 320.0;
+        if (!hasClearance(x3, z3)) continue;
+        const yGround = sampleTerrainYThree(x3, z3);
+        const rx = 0.8 + nextRand() * 1.8;
+        const ry = 0.6 + nextRand() * 1.2;
+        const rz = 0.8 + nextRand() * 1.7;
+        const rock = new THREE.Mesh(rockGeom, boulderMat);
+        rock.scale.set(rx, ry, rz);
+        rock.position.set(x3, yGround + ry * 0.35, z3);
+        rock.rotation.set(nextRand() * 3.0, nextRand() * 3.0, nextRand() * 3.0);
+        roadGroup.add(rock);
+        rocksPlaced++;
+      }
+    }
+
+    buildRoadAndScenery();
 
     // 5. Dynamic Active Triangulation Rays (Pre-allocated LineSegments Pool)
     const MAX_RAYS = 16;
@@ -1415,13 +1841,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
       // Position & Rotate 3D Truck
       truckMesh.position.copy(estThree);
-      truckMesh.rotation.set(0, headingRad, 0);
+      truckMesh.rotation.set(0, -headingRad, 0);
 
       // Update GT Ghost Marker
       if (hasGT && frameData.gt_pos_cm && document.getElementById('toggle-gt-traj').checked) {
         const gtThree = ueToThree(frameData.gt_pos_cm);
         gtGhostGroup.position.copy(gtThree);
-        gtGhostGroup.rotation.set(0, headingRad, 0);
+        gtGhostGroup.rotation.set(0, -headingRad, 0);
         gtGhostGroup.visible = true;
       } else {
         gtGhostGroup.visible = false;
@@ -1438,7 +1864,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
             rig.frustumGeom.attributes.position.array.set(newVerts);
             rig.frustumGeom.attributes.position.needsUpdate = true;
           }
-          if (dynState.forward) rig.currentForward = dynState.forward;
+          if (dynState.forward) {
+            rig.currentForward = dynState.forward;
+            rig.markerMesh.lookAt(rig.posThree.clone().add(ueDirToThree(dynState.forward)));
+          }
           if (dynState.up) rig.currentUp = dynState.up;
         }
       });
@@ -1480,7 +1909,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       if (activeCameraPreset === 'chase') {
         const backOffset = new THREE.Vector3(-32, 16, 0).applyAxisAngle(
           new THREE.Vector3(0, 1, 0),
-          headingRad
+          -headingRad
         );
         camera.position.lerp(estThree.clone().add(backOffset), 0.25);
         controls.target.lerp(estThree.clone().add(new THREE.Vector3(0, 2.5, 0)), 0.35);
@@ -1615,6 +2044,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('pt-size-label').textContent = `${val.toFixed(1)} px`;
       if (pointCloudMaterial) pointCloudMaterial.size = val;
     });
+    document.getElementById('toggle-road').addEventListener('change', e => {
+      roadGroup.visible = e.target.checked;
+    });
     document.getElementById('toggle-frustums').addEventListener('change', e => {
       camerasGroup.visible = e.target.checked;
       labelsContainer.style.display = e.target.checked ? 'block' : 'none';
@@ -1628,6 +2060,15 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     document.getElementById('toggle-gt-traj').addEventListener('change', e => {
       if (gtTrajectoryLine) gtTrajectoryLine.visible = e.target.checked;
       updateFrameState(currentFrameIdx);
+    });
+    document.getElementById('slider-traj-width').addEventListener('input', e => {
+      currentTrajRadius = parseFloat(e.target.value);
+      document.getElementById('traj-width-label').textContent = `${currentTrajRadius.toFixed(2)} m`;
+      rebuildTrajectories(currentTrajRadius, currentTrajStyle);
+    });
+    document.getElementById('select-traj-style').addEventListener('change', e => {
+      currentTrajStyle = e.target.value;
+      rebuildTrajectories(currentTrajRadius, currentTrajStyle);
     });
 
     // Timeline Transport Event Listeners

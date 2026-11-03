@@ -182,6 +182,16 @@ def test_export_3d_viewer_html_validation_mode(tmp_path):
     assert "Скрыть панели (H)" in html
     assert "KeyH" in html
 
+    # Verify Task 005 features: un-mirrored coords, trajectory thickness slider, style selector, 3D roadway & GT truck
+    assert "slider-traj-width" in html
+    assert "select-traj-style" in html
+    assert "toggle-road" in html
+    assert "TubeGeometry" in html
+    assert "roadGroup" in html
+    assert "createGTTruckMesh" in html
+    assert "const z3 = (y_ue - cy) / 100.0;" in html
+    assert "return new THREE.Vector3(dx, dz, dy).normalize();" in html
+
     # Verify embedded JSON round-trip integrity
     embedded = _extract_embedded_json(html)
     assert embedded["meta"]["has_ground_truth"] is True
