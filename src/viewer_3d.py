@@ -99,6 +99,13 @@ def _normalize_payload(scene_payload: Dict[str, Any]) -> Dict[str, Any]:
         "cameras": cameras,
         "frames": frames,
     }
+
+    if "tree_cloud" in scene_payload and scene_payload["tree_cloud"] is not None:
+        tree_cloud = dict(scene_payload["tree_cloud"])
+        tree_cloud.setdefault("points_cm", [])
+        tree_cloud.setdefault("colors_rgb", [])
+        normalized["tree_cloud"] = tree_cloud
+
     return _sanitize_for_json(normalized)
 
 
@@ -707,6 +714,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           <input type="checkbox" id="toggle-road" checked />
         </label>
         <label class="layer-item">
+          <span>Деревья и кроны (Tree Foliage)</span>
+          <input type="checkbox" id="toggle-trees" checked />
+        </label>
+        <label class="layer-item">
           <span>Camera Frustums &amp; Badges</span>
           <input type="checkbox" id="toggle-frustums" checked />
         </label>
@@ -1188,6 +1199,57 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     buildPointCloud();
+
+    // 2b. Build Tree Foliage & Crowns Point Cloud
+    let treeCloudObj = null;
+    if (SCENE_DATA.tree_cloud && SCENE_DATA.tree_cloud.points_cm && SCENE_DATA.tree_cloud.points_cm.length > 0) {
+      const tcPts = SCENE_DATA.tree_cloud.points_cm;
+      const tcCols = SCENE_DATA.tree_cloud.colors_rgb || [];
+      const nTrees = tcPts.length;
+      const treePositions = new Float32Array(nTrees * 3);
+      const treeColors = new Float32Array(nTrees * 3);
+
+      for (let i = 0; i < nTrees; i++) {
+        const pt = tcPts[i];
+        const x_ue = Number(pt[0] || 0.0);
+        const y_ue = Number(pt[1] || 0.0);
+        const z_ue = Number(pt[2] || 0.0);
+
+        const x = (x_ue - cx) / 100.0;
+        const y = (z_ue - cz) / 100.0;
+        const z = (y_ue - cy) / 100.0;
+
+        treePositions[i * 3] = x;
+        treePositions[i * 3 + 1] = y;
+        treePositions[i * 3 + 2] = z;
+
+        const c = tcCols[i] || [46, 125, 50];
+        treeColors[i * 3] = (Number(c[0] !== undefined ? c[0] : 46)) / 255.0;
+        treeColors[i * 3 + 1] = (Number(c[1] !== undefined ? c[1] : 125)) / 255.0;
+        treeColors[i * 3 + 2] = (Number(c[2] !== undefined ? c[2] : 50)) / 255.0;
+      }
+
+      const treeGeom = new THREE.BufferGeometry();
+      treeGeom.setAttribute('position', new THREE.BufferAttribute(treePositions, 3));
+      treeGeom.setAttribute('color', new THREE.BufferAttribute(treeColors, 3));
+
+      const treeMat = new THREE.PointsMaterial({
+        size: 1.8,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.9
+      });
+
+      treeCloudObj = new THREE.Points(treeGeom, treeMat);
+      scene.add(treeCloudObj);
+    }
+
+    const toggleTrees = document.getElementById('toggle-trees');
+    if (toggleTrees) {
+      toggleTrees.addEventListener('change', (e) => {
+        if (treeCloudObj) treeCloudObj.visible = e.target.checked;
+      });
+    }
 
     // 3. Build 5 Calibrated Camera Rigs & Frustums (with Dynamic PTZ Support for Cam 5)
     const camerasGroup = new THREE.Group();

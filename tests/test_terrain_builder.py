@@ -105,6 +105,9 @@ def test_schema_and_validation_mode_synthetic():
 
         for key in ("meta", "metrics", "terrain_mesh", "point_cloud", "cameras", "frames"):
             assert key in payload
+        assert "tree_cloud" in payload
+        assert "points_cm" in payload["tree_cloud"]
+        assert "colors_rgb" in payload["tree_cloud"]
 
         meta = payload["meta"]
         assert meta["coord_system"] == "UE5_cm"
@@ -228,3 +231,20 @@ def test_real_hackathon_dataset_integration():
     z_mesh_at_road = _bilinear_interpolate_mesh(traj_xy[:, 0], traj_xy[:, 1], x_grid, y_grid, zz_mesh)
     road_to_mesh_diff = float(np.median(np.abs(z_mesh_at_road - traj_z)))
     assert road_to_mesh_diff < 120.0, f"Road detached from valley floor by {road_to_mesh_diff:.1f} cm!"
+
+
+def test_no_artificial_hills_under_camera2():
+    calib_csv = os.path.join(HACKATHON_DIR, "object_transform_CineCameraActor2.csv")
+    gt_csv = os.path.join(HACKATHON_DIR, "object_transform_SM_AA_track.csv")
+    if not (os.path.exists(calib_csv) and os.path.exists(gt_csv)):
+        pytest.skip("Hackathon data not found")
+    gt_df = load_ground_truth(gt_csv).iloc[:30].copy()
+    payload = build_scene_3d_payload(
+        calib_dir=HACKATHON_DIR,
+        estimated_df=gt_df[["Frame", "Loc_X", "Loc_Y", "Loc_Z"]],
+        ground_truth_df=gt_df,
+        use_depth_model=False,
+        grid_size=32,
+    )
+    assert "tree_cloud" in payload
+    assert len(payload["tree_cloud"]["points_cm"]) > 0

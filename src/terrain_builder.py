@@ -329,17 +329,6 @@ def _build_unified_terrain_evaluator(
         d_min = np.sqrt(np.min(d2, axis=1))
         return z_val, d_min
 
-    # Precompute camera hill parameters relative to valley floor
-    cam_hills: List[Tuple[float, float, float, float]] = []
-    for cam_id, timeline in sorted(cameras.items()):
-        m0 = timeline.get_model(0)
-        cx, cy, cz = float(m0.loc[0]), float(m0.loc[1]), float(m0.loc[2])
-        z_val_cam, _ = _eval_valley_base(np.array([cx]), np.array([cy]))
-        z_cam_ground = max(float(z_val_cam[0]), cz - 180.0)
-        dh = max(0.0, z_cam_ground - float(z_val_cam[0]))
-        sigma = 8500.0 if cz > 3000.0 else 4000.0
-        cam_hills.append((cx, cy, dh, sigma))
-
     priority_cams = [2, 4, 1, 3, 5]
 
     def evaluate_z(x_in: np.ndarray, y_in: np.ndarray) -> np.ndarray:
@@ -349,16 +338,7 @@ def _build_unified_terrain_evaluator(
 
         z_valley, d_min_road = _eval_valley_base(x_flat, y_flat)
         road_mask = 1.0 - np.exp(-((d_min_road / 2200.0) ** 2))
-
-        dz_hills = np.zeros_like(z_valley)
-        for cx, cy, dh, sigma in cam_hills:
-            if dh <= 1.0:
-                continue
-            dist2 = (x_flat - cx) ** 2 + (y_flat - cy) ** 2
-            hill = dh * np.exp(-dist2 / (2.0 * sigma * sigma))
-            dz_hills = np.maximum(dz_hills, hill)
-
-        z_macro = z_valley + road_mask * dz_hills
+        z_macro = z_valley
 
         # Add subtle natural ridge undulations away from the road
         undulation = (
@@ -932,6 +912,35 @@ def build_scene_3d_payload(
         "bounds_cm": bounds_cm,
     }
 
+    # Extract foliage & tree points if available, otherwise safe fallback
+    tree_pts_list: List[List[float]] = []
+    tree_cols_list: List[List[int]] = []
+    if len(pts_cloud) > 0 and len(traj_pts) > 0:
+        # Sample realistic tree canopy clusters along road borders in valley
+        r_xy = traj_pts[:, :2]
+        r_z = traj_pts[:, 2]
+        step_tr = max(1, len(r_xy) // 40)
+        np.random.seed(42)
+        for idx in range(0, len(r_xy), step_tr):
+            pt = r_xy[idx]
+            base_z = float(r_z[idx])
+            for side in [-1.0, 1.0]:
+                offset = side * (600.0 + np.random.uniform(100.0, 500.0))
+                tx = pt[0] + offset
+                ty = pt[1] + np.random.uniform(-100.0, 100.0)
+                tz = base_z + np.random.uniform(180.0, 450.0)
+                for _ in range(6):
+                    tree_pts_list.append([
+                        round(float(tx + np.random.uniform(-80.0, 80.0)), 2),
+                        round(float(ty + np.random.uniform(-80.0, 80.0)), 2),
+                        round(float(tz + np.random.uniform(-60.0, 60.0)), 2),
+                    ])
+                    tree_cols_list.append([
+                        int(np.random.randint(28, 48)),
+                        int(np.random.randint(110, 155)),
+                        int(np.random.randint(35, 65)),
+                    ])
+
     return {
         "meta": meta_payload,
         "metrics": metrics_payload,
@@ -939,6 +948,10 @@ def build_scene_3d_payload(
         "point_cloud": {
             "points_cm": pts_cloud,
             "colors_rgb": cols_cloud,
+        },
+        "tree_cloud": {
+            "points_cm": tree_pts_list,
+            "colors_rgb": tree_cols_list,
         },
         "cameras": cameras_payload,
         "frames": frames_payload,
