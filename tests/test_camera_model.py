@@ -66,10 +66,15 @@ def test_point_projection_right_and_up():
 
 
 def test_load_all_cameras():
-    """Verify loading real camera CSV files from hackathon folder."""
+    """Verify loading real camera CSV files from hackathon folder with per-camera focal lengths."""
     cameras = load_all_cameras("хакатон")
     assert len(cameras) == 5
+    expected_focal = {1: 35.0, 2: 60.0, 3: 35.0, 4: 50.0, 5: 20.0}
     for cam_id in range(1, 6):
         assert cam_id in cameras
         # Verify 1001 frames loaded
         assert len(cameras[cam_id].frames) >= 1000
+        model0 = cameras[cam_id].get_model(0)
+        assert math.isclose(model0.focal_length_mm, expected_focal[cam_id], rel_tol=1e-4)
+        assert math.isclose(model0.sensor_width_mm, 23.76, rel_tol=1e-4)
+        assert math.isclose(model0.sensor_height_mm, 13.365, rel_tol=1e-4)

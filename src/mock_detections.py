@@ -39,9 +39,9 @@ def generate_mock_detections(
                 u_noisy = float(u + np.random.normal(0, noise_std_px))
                 v_noisy = float(v + np.random.normal(0, noise_std_px))
 
-                # Approximate truck bbox size based on distance
-                # Real truck ~8m long (800 units in UE), distance ~15000-40000 units
-                scale = 2828.0 / max(100.0, z_cam)
+                # Approximate truck bbox size based on distance and camera focal length fx
+                fx, _, _, _ = model.get_intrinsics()
+                scale = fx / max(100.0, z_cam)
                 box_w = float(np.clip(700.0 * scale, 15.0, 300.0))
                 box_h = float(np.clip(350.0 * scale, 10.0, 150.0))
                 conf = float(np.clip(min_confidence + np.random.uniform(0.0, 0.14), 0.0, 0.99))

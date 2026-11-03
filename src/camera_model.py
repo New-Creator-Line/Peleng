@@ -110,6 +110,18 @@ class CameraModel:
         v = float(uv_h[1] / uv_h[2])
         return u, v, z_cam
 
+    def project_ray_to_z(self, u: float, v: float, target_z: float = 450.0) -> Optional[np.ndarray]:
+        """Intersects a 2D pixel ray (u, v) with a horizontal world plane Z = target_z."""
+        fx, fy, cx, cy = self.get_intrinsics()
+        ray_cam = np.array([(u - cx) / fx, (v - cy) / fy, 1.0], dtype=np.float64)
+        ray_world = self.R_cam.T @ ray_cam
+        if abs(ray_world[2]) < 1e-6:
+            return None
+        lam = (target_z - self.loc[2]) / ray_world[2]
+        if lam <= 0:
+            return None
+        return self.loc + lam * ray_world
+
 
 class CameraTimeline:
     """Manages camera calibration parameters over all video frames."""
@@ -131,21 +143,63 @@ class CameraTimeline:
         raise ValueError(f"No camera model available for cam {self.cam_id}")
 
 
+def _parse_float(val: object) -> float:
+    return float(str(val).strip().replace(',', '.'))
+
+
+def _extract_optics_from_csv(df: pd.DataFrame) -> Tuple[float, float, float]:
+    """
+    Extracts focal_length_mm and sensor dimensions (sw, sh) from the camera CSV header/first row.
+    Header format: Frame;Loc_X;Loc_Y;Loc_Z;Rot_Roll;Rot_Pitch;Rot_Yaw;;;Focal length;60
+    First row format: ...;;;Размеры матрицы;23,76*13,365
+    """
+    focal_length = 35.0
+    sw, sh = 23.76, 13.365
+
+    cols = [str(c).strip() for c in df.columns]
+    for idx, col_name in enumerate(cols):
+        if col_name.lower().startswith("focal length") and idx + 1 < len(cols):
+            try:
+                focal_length = _parse_float(cols[idx + 1])
+            except ValueError:
+                pass
+            # Check first row of that same column for sensor dimensions "23,76*13,365"
+            if not df.empty:
+                raw_sensor = str(df.iloc[0, idx + 1]).strip()
+                sensor_match = re.search(r"(\d+[.,]?\d*)\s*\*\s*(\d+[.,]?\d*)", raw_sensor)
+                if sensor_match:
+                    try:
+                        sw = _parse_float(sensor_match.group(1))
+                        sh = _parse_float(sensor_match.group(2))
+                    except ValueError:
+                        pass
+            break
+
+    return focal_length, sw, sh
+
+
 def load_camera_csv(csv_path: str, cam_id: int) -> CameraTimeline:
     timeline = CameraTimeline(cam_id)
     df = pd.read_csv(csv_path, sep=';', encoding='cp1251')
 
-    col_map = {c.strip(): c.strip() for c in df.columns}
-    df.rename(columns=col_map, inplace=True)
+    focal_length, sw, sh = _extract_optics_from_csv(df)
 
-    focal_length = 35.0
-    sw, sh = 23.76, 13.365
+    col_map = {c: str(c).strip() for c in df.columns}
+    df = df.rename(columns=col_map)
 
     for _, row in df.iterrows():
         try:
-            frame_idx = int(row['Frame'])
-            loc = np.array([float(row['Loc_X']), float(row['Loc_Y']), float(row['Loc_Z'])])
-            rot = np.array([float(row['Rot_Roll']), float(row['Rot_Pitch']), float(row['Rot_Yaw'])])
+            frame_idx = int(_parse_float(row['Frame']))
+            loc = np.array([
+                _parse_float(row['Loc_X']),
+                _parse_float(row['Loc_Y']),
+                _parse_float(row['Loc_Z']),
+            ])
+            rot = np.array([
+                _parse_float(row['Rot_Roll']),
+                _parse_float(row['Rot_Pitch']),
+                _parse_float(row['Rot_Yaw']),
+            ])
 
             model = CameraModel(
                 cam_id=cam_id,

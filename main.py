@@ -86,18 +86,60 @@ def run_pipeline(
         obs_list = grouped_detections.get(frame_idx, [])
         valid_obs = [o for o in obs_list if o['conf'] >= conf_threshold and o['cam_id'] in cameras]
 
-        proj_matrices = []
-        points_2d = []
-
-        for obs in valid_obs:
-            cam_model = cameras[obs['cam_id']].get_model(frame_idx)
-            proj_matrices.append(cam_model.get_projection_matrix())
-            points_2d.append((obs['u'], obs['v']))
+        # Group observations by camera ID (keep highest confidence per camera first,
+        # and support pairwise consensus to reject single-camera false positives)
+        by_cam: Dict[int, List[Dict[str, float]]] = {}
+        for obs in sorted(valid_obs, key=lambda x: x['conf'], reverse=True):
+            by_cam.setdefault(obs['cam_id'], []).append(obs)
 
         pt_3d = None
         err = float("inf")
-        if len(proj_matrices) >= 2:
-            pt_3d, err = triangulator.triangulate(proj_matrices, points_2d)
+        cam_ids = list(by_cam.keys())
+
+        if len(cam_ids) >= 2:
+            pred_pos = tracker.x[:3] if tracker.is_initialized else None
+            best_score = float("inf")
+            for i in range(len(cam_ids)):
+                for j in range(i + 1, len(cam_ids)):
+                    c1, c2 = cam_ids[i], cam_ids[j]
+                    P1 = cameras[c1].get_model(frame_idx).get_projection_matrix()
+                    P2 = cameras[c2].get_model(frame_idx).get_projection_matrix()
+                    for o1 in by_cam[c1][:2]:
+                        for o2 in by_cam[c2][:2]:
+                            cand_pt, cand_err = triangulator.triangulate(
+                                [P1, P2], [(o1['u'], o1['v']), (o2['u'], o2['v'])]
+                            )
+                            if cand_pt is None or cand_err > 28.0:
+                                continue
+                            # Reject unphysical underground or sky points (e.g. false-positive drone)
+                            if not (-500.0 <= cand_pt[2] <= 2500.0):
+                                continue
+                            inlier_Ps = [P1, P2]
+                            inlier_uvs = [(o1['u'], o1['v']), (o2['u'], o2['v'])]
+                            for k, c3 in enumerate(cam_ids):
+                                if k in (i, j):
+                                    continue
+                                m3 = cameras[c3].get_model(frame_idx)
+                                u_p, v_p, z_c = m3.project_point(cand_pt)
+                                if z_c <= 0:
+                                    continue
+                                for o3 in by_cam[c3][:2]:
+                                    if np.hypot(u_p - o3['u'], v_p - o3['v']) < 28.0:
+                                        inlier_Ps.append(m3.get_projection_matrix())
+                                        inlier_uvs.append((o3['u'], o3['v']))
+                                        break
+                            if len(inlier_Ps) > 2:
+                                cand_pt, cand_err = triangulator.triangulate(inlier_Ps, inlier_uvs)
+                            if cand_pt is None or cand_err > 35.0:
+                                continue
+                            score = cand_err - 12.0 * len(inlier_Ps)
+                            if pred_pos is not None:
+                                dist_pred = float(np.linalg.norm(cand_pt - pred_pos))
+                                if dist_pred > 3500.0:
+                                    score += dist_pred * 0.05
+                            if score < best_score:
+                                best_score = score
+                                pt_3d, err = cand_pt, cand_err
 
         # Kalman Filter Step
         if pt_3d is not None and err < 60.0:
@@ -114,6 +156,15 @@ def run_pipeline(
             if tracker.is_initialized:
                 curr_pos = tracker.predict()
                 coasted_count += 1
+            elif valid_obs:
+                best_single = max(valid_obs, key=lambda x: x['conf'])
+                cam_model = cameras[best_single['cam_id']].get_model(frame_idx)
+                est_single = cam_model.project_ray_to_z(best_single['u'], best_single['v'], target_z=450.0)
+                if est_single is not None:
+                    tracker.initialize(est_single)
+                    curr_pos = est_single
+                else:
+                    curr_pos = np.zeros(3)
             else:
                 curr_pos = np.zeros(3)
 
