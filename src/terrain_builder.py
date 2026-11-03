@@ -5,12 +5,12 @@ import math
 import os
 import shutil
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from PIL import Image
-from scipy.interpolate import Rbf
+from scipy.ndimage import gaussian_filter
 
 from src.camera_model import CameraModel, CameraTimeline, load_all_cameras
 from src.evaluator import TrajectoryEvaluator
@@ -20,7 +20,7 @@ FRUSTUM_DISTANCE_CM = 4000.0
 MAX_POINT_CLOUD_POINTS = 12000
 
 
-def _camera_basis_vectors(model: CameraModel) -> Tuple[ np.ndarray, np.ndarray, np.ndarray ]:
+def _camera_basis_vectors(model: CameraModel) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Extracts world-space unit basis vectors (forward, right, up) from CameraModel.R_cam.
     Recall from src.camera_model.get_ue_camera_rotation_matrix:
@@ -71,7 +71,7 @@ def _is_camera_dynamic(timeline: CameraTimeline) -> bool:
     if len(timeline.frames) <= 1:
         return False
     frame_keys = sorted(timeline.frames.keys())
-    sample_keys = frame_keys[::max(1, len(frame_keys) // 20)]
+    sample_keys = frame_keys[:: max(1, len(frame_keys) // 20)]
     rots = np.array([timeline.frames[k].rot for k in sample_keys], dtype=np.float64)
     locs = np.array([timeline.frames[k].loc for k in sample_keys], dtype=np.float64)
     rot_ptp = float(np.max(np.ptp(rots, axis=0)))
@@ -115,9 +115,9 @@ def _extract_video_frame_rgb(
     Falls back to procedural outdoor frame if video file or decoder is unavailable.
     """
     if os.path.exists(video_path):
-        # 1. Try OpenCV if available
         try:
             import cv2  # type: ignore
+
             cap = cv2.VideoCapture(video_path)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -128,7 +128,6 @@ def _extract_video_frame_rgb(
         except Exception:
             pass
 
-        # 2. Try ffmpeg subprocess pipe
         ffmpeg_bin = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
         if os.path.exists(ffmpeg_bin):
             try:
@@ -181,19 +180,16 @@ def _hypsometric_color(z_cm: float, x_cm: float = 0.0, y_cm: float = 0.0) -> Tup
     t_mod = float(np.clip(t + tex, 0.0, 1.0))
 
     if t_mod < 0.18:
-        # Valley floor: olive/sage grass & dirt road tones
         u = t_mod / 0.18
         r = 86.0 + u * 22.0
         g = 104.0 + u * 18.0
         b = 68.0 + u * 14.0
     elif t_mod < 0.65:
-        # Mid mountain slopes: dry scrub & rocky ochre/slate
         u = (t_mod - 0.18) / 0.47
         r = 108.0 + u * 34.0
         g = 122.0 + u * 14.0
         b = 82.0 + u * 26.0
     else:
-        # High alpine ridges (Z > 5000 cm): light grey-brown rock & sunlit peaks
         u = (t_mod - 0.65) / 0.35
         r = 142.0 + u * 46.0
         g = 136.0 + u * 48.0
@@ -202,73 +198,258 @@ def _hypsometric_color(z_cm: float, x_cm: float = 0.0, y_cm: float = 0.0) -> Tup
     return int(np.clip(r, 0, 255)), int(np.clip(g, 0, 255)), int(np.clip(b, 0, 255))
 
 
-def _build_terrain_rbf(
+def _load_or_compute_neural_relief_maps(
+    calib_dir: str,
+    cameras: Dict[int, CameraTimeline],
+    cam_frames: Dict[int, np.ndarray],
+    use_depth_model: bool = True,
+) -> Tuple[Dict[int, np.ndarray], str]:
+    """
+    Computes or loads cached zero-mean normalized local relief maps (180x320 float32, in cm)
+    from `depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf`.
+    """
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    old_cache = os.path.join(project_root, "results", ".cache_terrain_depth.npz")
+    if os.path.exists(old_cache):
+        try:
+            os.remove(old_cache)
+        except Exception:
+            pass
+
+    cache_path = os.path.join(project_root, "results", ".cache_terrain_depth_v2.npz")
+    calib_hash = hashlib.md5(os.path.abspath(calib_dir).encode("utf-8")).hexdigest()[:12]
+    has_real_videos = any(
+        os.path.exists(os.path.join(calib_dir, f"Way1.FinalImage.CineCameraActor{cid}.mp4"))
+        for cid in cameras.keys()
+    )
+
+    if use_depth_model and has_real_videos and os.path.exists(cache_path):
+        try:
+            cached = np.load(cache_path, allow_pickle=False)
+            if str(cached["calib_hash"]) == calib_hash:
+                relief_maps: Dict[int, np.ndarray] = {}
+                for cid in cameras.keys():
+                    key = f"relief_{cid}"
+                    if key in cached:
+                        relief_maps[cid] = cached[key].astype(np.float64)
+                if relief_maps:
+                    return relief_maps, MODEL_ID
+        except Exception:
+            pass
+
+    if use_depth_model and has_real_videos:
+        try:
+            import torch
+            from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+            device = (
+                "mps"
+                if torch.backends.mps.is_available()
+                else ("cuda" if torch.cuda.is_available() else "cpu")
+            )
+            processor = AutoImageProcessor.from_pretrained(MODEL_ID)
+            model_net = AutoModelForDepthEstimation.from_pretrained(MODEL_ID).to(device).eval()
+
+            relief_maps = {}
+            save_dict: Dict[str, Any] = {"calib_hash": np.array(calib_hash)}
+
+            for cam_id in sorted(cameras.keys()):
+                if cam_id not in cam_frames:
+                    continue
+                rgb_full = cam_frames[cam_id]
+                pil_small = Image.fromarray(rgb_full).resize((640, 360), Image.Resampling.BILINEAR)
+                inputs = processor(images=pil_small, return_tensors="pt").to(device)
+                with torch.no_grad():
+                    outputs = model_net(**inputs)
+                post = processor.post_process_depth_estimation(outputs, target_sizes=[(180, 320)])
+                depth_raw = post[0]["predicted_depth"].detach().cpu().numpy().astype(np.float64)
+
+                # Extract high-pass local terrain relief (hills, gullies, vegetation bumps)
+                smooth_bg = gaussian_filter(depth_raw, sigma=14.0)
+                residual = depth_raw - smooth_bg
+                robust_std = float(np.percentile(np.abs(residual), 85)) + 1e-4
+                # Scale local relief to +/- 120 cm (+/- 1.2 meters)
+                relief_cm = np.clip(residual / robust_std, -1.0, 1.0) * 120.0
+                # Zero out sky region (top 25% of frame)
+                relief_cm[: int(0.25 * relief_cm.shape[0]), :] = 0.0
+
+                relief_maps[cam_id] = relief_cm
+                save_dict[f"relief_{cam_id}"] = relief_cm.astype(np.float32)
+
+            if relief_maps:
+                try:
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    np.savez_compressed(cache_path, **save_dict)
+                except Exception:
+                    pass
+                return relief_maps, MODEL_ID
+        except Exception:
+            pass
+
+    model_label = MODEL_ID if use_depth_model else "IDW_Valley+CameraHills+MultiCamRGB"
+    return {}, model_label
+
+
+def _build_unified_terrain_evaluator(
     traj_pts: np.ndarray,
     cameras: Dict[int, CameraTimeline],
-    bounds_cm: Dict[str, float],
-) -> Rbf:
+    relief_maps: Dict[int, np.ndarray],
+    ref_frame: int = 100,
+) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
     """
-    Constructs a smooth continuous 3D valley elevation surface Z(X, Y) using
-    multiquadric Radial Basis Function interpolation from:
-      1. Subsampled 3D trajectory points along the valley road.
-      2. Camera ground/mountain ridge bases (Cam 1..5).
-      3. Valley corridor & ridge boundary anchors around bounds_cm.
+    Constructs a physically grounded, unified elevation function `evaluate_z(x_arr, y_arr)`
+    that guarantees:
+      1. Valley Floor Base (`z_valley`): Smooth IDW interpolation along the road trajectory
+         (`Z in [300, 718] cm`), keeping the valley floor flat/gently graded at the true road level.
+      2. Localized Camera Hills (`dz_hills`): Smooth Gaussian hills ONLY around each camera
+         (`sigma = 8500 cm` for high mountain cameras Cam 2 & 4, `sigma = 4000 cm` for valley
+         cameras Cam 1, 3, 5), masked by `road_mask` so hills never bury the road.
+      3. Neural Depth Micro-Relief (`dz_depth`): Real local terrain relief (+/- 120 cm) from
+         `Depth-Anything-V2-Metric-Outdoor-Small-hf` projected onto the valley surface.
     """
-    anchor_xyz: List[Tuple[float, float, float]] = []
-
-    # 1. Trajectory road points (subsampled so conditioning is fast and well-spaced)
     if len(traj_pts) > 0:
-        step = max(1, len(traj_pts) // 45)
-        for pt in traj_pts[::step]:
-            anchor_xyz.append((float(pt[0]), float(pt[1]), float(pt[2])))
-        # Always include start and end points
-        anchor_xyz.append((float(traj_pts[0, 0]), float(traj_pts[0, 1]), float(traj_pts[0, 2])))
-        anchor_xyz.append((float(traj_pts[-1, 0]), float(traj_pts[-1, 1]), float(traj_pts[-1, 2])))
+        step = max(1, len(traj_pts) // 80)
+        road_anchors = traj_pts[::step].copy()
+        if not np.allclose(road_anchors[-1], traj_pts[-1]):
+            road_anchors = np.vstack([road_anchors, traj_pts[-1:]])
+    else:
+        road_anchors = np.array([[0.0, 0.0, 400.0]], dtype=np.float64)
 
-    # 2. Camera ground / mountain bases
+    rx = road_anchors[:, 0]
+    ry = road_anchors[:, 1]
+    rz = road_anchors[:, 2]
+
+    def _eval_valley_base(x_flat: np.ndarray, y_flat: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        dx = x_flat[:, None] - rx[None, :]
+        dy = y_flat[:, None] - ry[None, :]
+        d2 = dx * dx + dy * dy
+        # Dual-scale IDW: tight near the road (400 cm) and broad across the valley floor (3000 cm)
+        w = 0.65 / (d2 + 3000.0**2) + 0.35 / (d2 + 450.0**2)
+        z_val = np.sum(w * rz[None, :], axis=1) / np.sum(w, axis=1)
+        d_min = np.sqrt(np.min(d2, axis=1))
+        return z_val, d_min
+
+    # Precompute camera hill parameters relative to valley floor
+    cam_hills: List[Tuple[float, float, float, float]] = []
     for cam_id, timeline in sorted(cameras.items()):
-        model = timeline.get_model(0)
-        cx, cy, cz = float(model.loc[0]), float(model.loc[1]), float(model.loc[2])
-        if cz > 3000.0:
-            # High mountain overview camera (e.g. Cam 2 at Z=7912, Cam 4 at Z=7147)
-            z_base = cz - 150.0
-        else:
-            # Valley tripod/tower camera (e.g. Cam 1, 3, 5)
-            z_base = max(300.0, cz - 250.0)
-        anchor_xyz.append((cx, cy, z_base))
+        m0 = timeline.get_model(0)
+        cx, cy, cz = float(m0.loc[0]), float(m0.loc[1]), float(m0.loc[2])
+        z_val_cam, _ = _eval_valley_base(np.array([cx]), np.array([cy]))
+        z_cam_ground = max(float(z_val_cam[0]), cz - 180.0)
+        dh = max(0.0, z_cam_ground - float(z_val_cam[0]))
+        sigma = 8500.0 if cz > 3000.0 else 4000.0
+        cam_hills.append((cx, cy, dh, sigma))
 
-    # 3. Perimeter / valley-wall anchors for natural canyon/valley bowls
-    x_min, x_max = bounds_cm["x_min"], bounds_cm["x_max"]
-    y_min, y_max = bounds_cm["y_min"], bounds_cm["y_max"]
-    x_mid = 0.5 * (x_min + x_max)
-    y_mid = 0.5 * (y_min + y_max)
+    priority_cams = [2, 4, 1, 3, 5]
 
-    perimeter_anchors = [
-        (x_min, y_min, 3800.0),
-        (x_min, y_mid, 2200.0),
-        (x_min, y_max, 4200.0),
-        (x_mid, y_min, 3400.0),
-        (x_mid, y_max, 6400.0),
-        (x_max, y_min, 5200.0),
-        (x_max, y_mid, 1800.0),
-        (x_max, y_max, 4600.0),
-    ]
-    anchor_xyz.extend(perimeter_anchors)
+    def evaluate_z(x_in: np.ndarray, y_in: np.ndarray) -> np.ndarray:
+        orig_shape = np.shape(x_in)
+        x_flat = np.asarray(x_in, dtype=np.float64).ravel()
+        y_flat = np.asarray(y_in, dtype=np.float64).ravel()
 
-    arr = np.asarray(anchor_xyz, dtype=np.float64)
-    # Deduplicate close XY points to prevent singular matrix in RBF
-    dedup_xy: List[np.ndarray] = []
-    for row in arr:
-        if not dedup_xy:
-            dedup_xy.append(row)
-            continue
-        dists = [math.hypot(float(row[0] - prev[0]), float(row[1] - prev[1])) for prev in dedup_xy]
-        if min(dists) > 150.0:
-            dedup_xy.append(row)
+        z_valley, d_min_road = _eval_valley_base(x_flat, y_flat)
+        road_mask = 1.0 - np.exp(-((d_min_road / 2200.0) ** 2))
 
-    pts = np.asarray(dedup_xy, dtype=np.float64)
-    rbf = Rbf(pts[:, 0], pts[:, 1], pts[:, 2], function="multiquadric", smooth=2.0)
-    return rbf
+        dz_hills = np.zeros_like(z_valley)
+        for cx, cy, dh, sigma in cam_hills:
+            if dh <= 1.0:
+                continue
+            dist2 = (x_flat - cx) ** 2 + (y_flat - cy) ** 2
+            hill = dh * np.exp(-dist2 / (2.0 * sigma * sigma))
+            dz_hills = np.maximum(dz_hills, hill)
+
+        z_macro = z_valley + road_mask * dz_hills
+
+        # Add subtle natural ridge undulations away from the road
+        undulation = (
+            35.0 * np.sin(x_flat * 0.00018) * np.cos(y_flat * 0.00022) * road_mask
+        )
+        z_total = z_macro + undulation
+
+        # Project into neural depth relief maps if available
+        if relief_maps:
+            dz_relief = np.zeros_like(z_total)
+            covered = np.zeros(len(z_total), dtype=bool)
+            pts_3d = np.stack([x_flat, y_flat, z_total], axis=1)
+
+            for cid in priority_cams:
+                if cid not in cameras or cid not in relief_maps:
+                    continue
+                rmap = relief_maps[cid]
+                rh, rw = rmap.shape
+                cam_m = cameras[cid].get_model(ref_frame)
+                w_px = float(cam_m.image_width_px)
+                h_px = float(cam_m.image_height_px)
+
+                # Vectorized camera projection: pt_cam = (pts_3d - loc) @ R_cam.T
+                pts_cam = (pts_3d - cam_m.loc[None, :]) @ cam_m.R_cam.T
+                z_c = pts_cam[:, 2]
+                valid = (~covered) & (z_c > 250.0)
+                if not np.any(valid):
+                    continue
+
+                fx, fy, cx_p, cy_p = cam_m.get_intrinsics()
+                u = fx * (pts_cam[valid, 0] / z_c[valid]) + cx_p
+                v = fy * (pts_cam[valid, 1] / z_c[valid]) + cy_p
+
+                in_fov = (u >= 0.0) & (u < w_px - 1.0) & (v >= 0.25 * h_px) & (v < h_px - 1.0)
+                if not np.any(in_fov):
+                    continue
+
+                valid_indices = np.flatnonzero(valid)[in_fov]
+                ui = np.clip((u[in_fov] / w_px * rw).astype(int), 0, rw - 1)
+                vi = np.clip((v[in_fov] / h_px * rh).astype(int), 0, rh - 1)
+                dz_relief[valid_indices] = rmap[vi, ui]
+                covered[valid_indices] = True
+
+            z_total = z_total + road_mask * dz_relief
+
+        z_clamped = np.clip(z_total, 200.0, 8500.0)
+        return z_clamped.reshape(orig_shape)
+
+    return evaluate_z
+
+
+def _bilinear_interpolate_mesh(
+    px: np.ndarray,
+    py: np.ndarray,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    zz_mesh: np.ndarray,
+) -> np.ndarray:
+    """
+    Evaluates the exact bilinear surface of `terrain_mesh` (`zz_mesh` over `x_grid`, `y_grid`)
+    at arbitrary `(px, py)` query coordinates so that point cloud elevations are 100% locked
+    to the rendered triangle mesh.
+    """
+    cols = len(x_grid)
+    rows = len(y_grid)
+    x_min, x_max = float(x_grid[0]), float(x_grid[-1])
+    y_min, y_max = float(y_grid[0]), float(y_grid[-1])
+
+    u = np.clip((px - x_min) / max(1e-6, x_max - x_min) * (cols - 1), 0.0, cols - 1.0001)
+    v = np.clip((py - y_min) / max(1e-6, y_max - y_min) * (rows - 1), 0.0, rows - 1.0001)
+
+    c0 = np.floor(u).astype(int)
+    r0 = np.floor(v).astype(int)
+    c1 = np.minimum(c0 + 1, cols - 1)
+    r1 = np.minimum(r0 + 1, rows - 1)
+
+    du = u - c0
+    dv = v - r0
+
+    z00 = zz_mesh[r0, c0]
+    z10 = zz_mesh[r0, c1]
+    z01 = zz_mesh[r1, c0]
+    z11 = zz_mesh[r1, c1]
+
+    z_interp = (
+        (1.0 - du) * (1.0 - dv) * z00
+        + du * (1.0 - dv) * z10
+        + (1.0 - du) * dv * z01
+        + du * dv * z11
+    )
+    return z_interp
 
 
 def _sample_projected_color(
@@ -290,252 +471,108 @@ def _sample_projected_color(
         model = cameras[cam_id].get_model(ref_frame)
         u, v, z_cam = model.project_point(pt_3d)
         h, w, _ = cam_frames[cam_id].shape
-        # Exclude sky region (top 22% of image) and out-of-frame projections
         if z_cam > 200.0 and (0.0 <= u < w - 1) and (0.22 * h <= v < h - 1):
             ui = int(round(u))
             vi = int(round(v))
             px = cam_frames[cam_id][vi, ui]
-            # Blend 70% real camera RGB + 30% hypsometric terrain shading
-            r = int(np.clip(0.70 * float(px[0]) + 0.30 * base_r, 0, 255))
-            g = int(np.clip(0.70 * float(px[1]) + 0.30 * base_g, 0, 255))
-            b = int(np.clip(0.70 * float(px[2]) + 0.30 * base_b, 0, 255))
+            r = int(np.clip(0.72 * float(px[0]) + 0.28 * base_r, 0, 255))
+            g = int(np.clip(0.72 * float(px[1]) + 0.28 * base_g, 0, 255))
+            b = int(np.clip(0.72 * float(px[2]) + 0.28 * base_b, 0, 255))
             return r, g, b
 
     return base_r, base_g, base_b
 
 
-def _compute_calibrated_depth_point_cloud(
-    calib_dir: str,
+def _build_locked_surface_point_cloud(
     cameras: Dict[int, CameraTimeline],
     cam_frames: Dict[int, np.ndarray],
     traj_pts: np.ndarray,
-    rbf_surface: Rbf,
-    bounds_cm: Dict[str, float],
-    use_depth_model: bool = True,
-    ref_frame: int = 100,
-) -> Tuple[List[List[float]], List[List[int]], str]:
-    """
-    Computes the 3D point cloud in UE5_cm with RGB colors.
-    When `use_depth_model=True` and video files exist in `calib_dir`, runs
-    `depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf` on downscaled
-    reference camera frames, aligns each depth map to the 3D trajectory via
-    Median Scale & Shift Calibration, and caches results in
-    `results/.cache_terrain_depth.npz`.
-    """
-    has_real_videos = any(
-        os.path.exists(os.path.join(calib_dir, f"Way1.FinalImage.CineCameraActor{cid}.mp4"))
-        for cid in cameras.keys()
-    )
-
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cache_path = os.path.join(project_root, "results", ".cache_terrain_depth.npz")
-    calib_hash = hashlib.md5(os.path.abspath(calib_dir).encode("utf-8")).hexdigest()[:12]
-
-    if use_depth_model and has_real_videos and os.path.exists(cache_path):
-        try:
-            cached = np.load(cache_path, allow_pickle=False)
-            if str(cached["calib_hash"]) == calib_hash:
-                pts_arr = cached["points_cm"]
-                cols_arr = cached["colors_rgb"]
-                if len(pts_arr) > 100 and pts_arr.shape == cols_arr.shape:
-                    return (
-                        np.round(pts_arr, 1).tolist(),
-                        cols_arr.astype(int).tolist(),
-                        MODEL_ID,
-                    )
-        except Exception:
-            pass
-
-    if use_depth_model and has_real_videos:
-        try:
-            import torch
-            from transformers import AutoImageProcessor, AutoModelForDepthEstimation
-
-            device = (
-                "mps"
-                if torch.backends.mps.is_available()
-                else ("cuda" if torch.cuda.is_available() else "cpu")
-            )
-            processor = AutoImageProcessor.from_pretrained(MODEL_ID)
-            model_net = AutoModelForDepthEstimation.from_pretrained(MODEL_ID).to(device).eval()
-
-            all_pts: List[List[float]] = []
-            all_cols: List[List[int]] = []
-
-            for cam_id, timeline in sorted(cameras.items()):
-                if cam_id not in cam_frames:
-                    continue
-                rgb_full = cam_frames[cam_id]
-                h_full, w_full, _ = rgb_full.shape
-                cam_model = timeline.get_model(ref_frame)
-
-                # Downscale to 640x360 for fast neural depth inference (~0.18s on M1 MPS)
-                infer_w, infer_h = 640, 360
-                pil_small = Image.fromarray(rgb_full).resize(
-                    (infer_w, infer_h), Image.Resampling.BILINEAR
-                )
-                inputs = processor(images=pil_small, return_tensors="pt").to(device)
-                with torch.no_grad():
-                    outputs = model_net(**inputs)
-                post = processor.post_process_depth_estimation(
-                    outputs, target_sizes=[(h_full, w_full)]
-                )
-                depth_raw = post[0]["predicted_depth"].detach().cpu().numpy().astype(np.float64)
-
-                # Ensure depth_raw increases with distance (handle inverse depth if needed)
-                low_med = float(np.median(depth_raw[int(0.78 * h_full) : int(0.95 * h_full), :]))
-                high_med = float(np.median(depth_raw[int(0.32 * h_full) : int(0.48 * h_full), :]))
-                if low_med > high_med > 1e-4:
-                    depth_metric = 1.0 / np.maximum(depth_raw, 1e-3)
-                else:
-                    depth_metric = np.maximum(depth_raw, 1e-3)
-
-                # Median Scale & Shift Alignment using 3D trajectory projections
-                z_true_list: List[float] = []
-                z_net_list: List[float] = []
-                for pt_3d in traj_pts[::3]:
-                    u, v, z_c = cam_model.project_point(pt_3d)
-                    if z_c > 150.0 and (4 <= u < w_full - 4) and (4 <= v < h_full - 4):
-                        ui, vi = int(round(u)), int(round(v))
-                        patch = depth_metric[vi - 2 : vi + 3, ui - 2 : ui + 3]
-                        z_net_val = float(np.median(patch))
-                        if z_net_val > 1e-4:
-                            z_true_list.append(z_c)
-                            z_net_list.append(z_net_val)
-
-                if len(z_true_list) >= 3:
-                    ratios = np.asarray(z_true_list) / np.asarray(z_net_list)
-                    scale_s = float(np.median(ratios))
-                    shift_tz = float(
-                        np.median(np.asarray(z_true_list) - scale_s * np.asarray(z_net_list))
-                    )
-                    # Blend robust scale with bounded affine shift
-                    z_calibrated = np.clip(
-                        0.85 * (scale_s * depth_metric) + 0.15 * (scale_s * depth_metric + shift_tz),
-                        400.0,
-                        55000.0,
-                    )
-                else:
-                    # Fallback scale to camera-to-valley median distance
-                    valley_center = np.mean(traj_pts, axis=0) if len(traj_pts) > 0 else np.zeros(3)
-                    dist_center = float(np.linalg.norm(valley_center - cam_model.loc))
-                    med_d = float(np.median(depth_metric[int(0.4 * h_full) :, :]))
-                    scale_s = dist_center / max(med_d, 1e-3)
-                    z_calibrated = np.clip(scale_s * depth_metric, 400.0, 55000.0)
-
-                # Unproject subsampled grid of non-sky pixels (v >= 0.26 * H)
-                step_px = 26
-                for vi in range(int(0.26 * h_full), h_full - 8, step_px):
-                    for ui in range(8, w_full - 8, step_px):
-                        z_val = float(z_calibrated[vi, ui])
-                        ray_dir = _pixel_to_ray(cam_model, float(ui), float(vi))
-                        pt_w = cam_model.loc + ray_dir * z_val
-
-                        # Anchor unprojected point to physical valley bounds & terrain envelope
-                        if (
-                            bounds_cm["x_min"] <= pt_w[0] <= bounds_cm["x_max"]
-                            and bounds_cm["y_min"] <= pt_w[1] <= bounds_cm["y_max"]
-                        ):
-                            z_surf = float(
-                                np.clip(rbf_surface(pt_w[0], pt_w[1]), 200.0, 8500.0)
-                            )
-                            # Fuse neural depth elevation with terrain surface envelope
-                            pt_z = float(np.clip(0.35 * pt_w[2] + 0.65 * z_surf, 220.0, 8400.0))
-                            px_rgb = rgb_full[vi, ui]
-                            all_pts.append([float(pt_w[0]), float(pt_w[1]), pt_z])
-                            all_cols.append([int(px_rgb[0]), int(px_rgb[1]), int(px_rgb[2])])
-
-            # Supplement with dense road corridor & slope samples if needed
-            if len(all_pts) < 3000:
-                extra_pts, extra_cols = _sample_fallback_point_cloud(
-                    cameras, cam_frames, traj_pts, rbf_surface, bounds_cm, ref_frame=ref_frame
-                )
-                all_pts.extend(extra_pts)
-                all_cols.extend(extra_cols)
-
-            if len(all_pts) > MAX_POINT_CLOUD_POINTS:
-                idx = np.linspace(0, len(all_pts) - 1, MAX_POINT_CLOUD_POINTS, dtype=int)
-                all_pts = [all_pts[i] for i in idx]
-                all_cols = [all_cols[i] for i in idx]
-
-            try:
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                np.savez_compressed(
-                    cache_path,
-                    calib_hash=np.array(calib_hash),
-                    points_cm=np.asarray(all_pts, dtype=np.float32),
-                    colors_rgb=np.asarray(all_cols, dtype=np.uint8),
-                )
-            except Exception:
-                pass
-
-            return (
-                [[round(p[0], 1), round(p[1], 1), round(p[2], 1)] for p in all_pts],
-                all_cols,
-                MODEL_ID,
-            )
-        except Exception:
-            pass
-
-    # Fast deterministic fallback point cloud when use_depth_model=False or videos absent
-    pts_fb, cols_fb = _sample_fallback_point_cloud(
-        cameras, cam_frames, traj_pts, rbf_surface, bounds_cm, ref_frame=ref_frame
-    )
-    model_label = MODEL_ID if use_depth_model else "scipy.interpolate.Rbf+MultiCamProjection"
-    return pts_fb, cols_fb, model_label
-
-
-def _sample_fallback_point_cloud(
-    cameras: Dict[int, CameraTimeline],
-    cam_frames: Dict[int, np.ndarray],
-    traj_pts: np.ndarray,
-    rbf_surface: Rbf,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    zz_mesh: np.ndarray,
     bounds_cm: Dict[str, float],
     ref_frame: int = 100,
 ) -> Tuple[List[List[float]], List[List[int]]]:
     """
-    Deterministic point cloud sampler covering the valley floor, road corridor,
-    and mountain ridges with projected camera RGB colors.
+    Generates the 3D point cloud locked directly onto the unified terrain mesh surface
+    so that the mesh is stretched seamlessly across the point cloud with zero underground
+    or floating detachment (`|z_point - z_mesh(x, y)| <= 6 cm`).
     """
     rng = np.random.default_rng(42)
     priority_cams = [2, 4, 1, 3, 5]
+    xy_candidates: List[Tuple[float, float]] = []
+
+    # 1. Dense samples along the road corridor & valley floor
+    if len(traj_pts) > 0:
+        step = max(1, len(traj_pts) // 300)
+        for pt in traj_pts[::step]:
+            for _ in range(8):
+                dx = float(rng.normal(0.0, 1400.0))
+                dy = float(rng.normal(0.0, 1400.0))
+                px = float(np.clip(pt[0] + dx, bounds_cm["x_min"], bounds_cm["x_max"]))
+                py = float(np.clip(pt[1] + dy, bounds_cm["y_min"], bounds_cm["y_max"]))
+                xy_candidates.append((px, py))
+
+    # 2. Dense samples around each camera's hill/mountain slope and viewing footprint
+    for cam_id, timeline in sorted(cameras.items()):
+        m0 = timeline.get_model(ref_frame)
+        cx, cy, cz = float(m0.loc[0]), float(m0.loc[1]), float(m0.loc[2])
+        spread = 7000.0 if cz > 3000.0 else 3800.0
+        for _ in range(450):
+            px = float(np.clip(cx + rng.normal(0.0, spread), bounds_cm["x_min"], bounds_cm["x_max"]))
+            py = float(np.clip(cy + rng.normal(0.0, spread), bounds_cm["y_min"], bounds_cm["y_max"]))
+            xy_candidates.append((px, py))
+
+    # 3. Uniform + jittered valley-wide terrain surface grid samples (84 x 84 = 7056 points)
+    xs = np.linspace(bounds_cm["x_min"], bounds_cm["x_max"], 84)
+    ys = np.linspace(bounds_cm["y_min"], bounds_cm["y_max"], 84)
+    cell_dx = (bounds_cm["x_max"] - bounds_cm["x_min"]) / 84.0
+    cell_dy = (bounds_cm["y_max"] - bounds_cm["y_min"]) / 84.0
+    xx, yy = np.meshgrid(xs, ys)
+    for r_idx in range(84):
+        for c_idx in range(84):
+            px = float(
+                np.clip(
+                    xx[r_idx, c_idx] + rng.uniform(-0.35 * cell_dx, 0.35 * cell_dx),
+                    bounds_cm["x_min"],
+                    bounds_cm["x_max"],
+                )
+            )
+            py = float(
+                np.clip(
+                    yy[r_idx, c_idx] + rng.uniform(-0.35 * cell_dy, 0.35 * cell_dy),
+                    bounds_cm["y_min"],
+                    bounds_cm["y_max"],
+                )
+            )
+            xy_candidates.append((px, py))
+
+    if len(xy_candidates) > MAX_POINT_CLOUD_POINTS:
+        idx = np.linspace(0, len(xy_candidates) - 1, MAX_POINT_CLOUD_POINTS, dtype=int)
+        xy_candidates = [xy_candidates[i] for i in idx]
+
+    xy_arr = np.asarray(xy_candidates, dtype=np.float64)
+    z_locked = _bilinear_interpolate_mesh(xy_arr[:, 0], xy_arr[:, 1], x_grid, y_grid, zz_mesh)
+
     points_cm: List[List[float]] = []
     colors_rgb: List[List[int]] = []
 
-    # 1. Sample dense points along the road corridor
-    if len(traj_pts) > 0:
-        step = max(1, len(traj_pts) // 250)
-        for pt in traj_pts[::step]:
-            for _ in range(6):
-                dx = float(rng.normal(0.0, 900.0))
-                dy = float(rng.normal(0.0, 900.0))
-                px = float(np.clip(pt[0] + dx, bounds_cm["x_min"], bounds_cm["x_max"]))
-                py = float(np.clip(pt[1] + dy, bounds_cm["y_min"], bounds_cm["y_max"]))
-                pz = float(np.clip(rbf_surface(px, py), 220.0, 8400.0))
-                r, g, b = _sample_projected_color(
-                    np.array([px, py, pz]), cameras, cam_frames, priority_cams, ref_frame
-                )
-                points_cm.append([round(px, 1), round(py, 1), round(pz, 1)])
-                colors_rgb.append([r, g, b])
+    for i in range(len(xy_arr)):
+        px = float(xy_arr[i, 0])
+        py = float(xy_arr[i, 1])
+        # Lock point directly onto the mesh surface (+3 cm so points sit cleanly on the upper skin)
+        pz = float(z_locked[i] + 3.0)
+        r, g, b = _sample_projected_color(
+            np.array([px, py, pz], dtype=np.float64),
+            cameras,
+            cam_frames,
+            priority_cams,
+            ref_frame=ref_frame,
+        )
+        points_cm.append([round(px, 1), round(py, 1), round(pz, 1)])
+        colors_rgb.append([r, g, b])
 
-    # 2. Sample wide valley & mountain slope scatter points
-    xs = np.linspace(bounds_cm["x_min"], bounds_cm["x_max"], 48)
-    ys = np.linspace(bounds_cm["y_min"], bounds_cm["y_max"], 48)
-    xx, yy = np.meshgrid(xs, ys)
-    zz = np.clip(rbf_surface(xx, yy), 220.0, 8400.0)
-
-    for r_idx in range(48):
-        for c_idx in range(48):
-            px = float(xx[r_idx, c_idx] + rng.uniform(-250.0, 250.0))
-            py = float(yy[r_idx, c_idx] + rng.uniform(-250.0, 250.0))
-            pz = float(zz[r_idx, c_idx])
-            r, g, b = _sample_projected_color(
-                np.array([px, py, pz]), cameras, cam_frames, priority_cams, ref_frame
-            )
-            points_cm.append([round(px, 1), round(py, 1), round(pz, 1)])
-            colors_rgb.append([r, g, b])
-
-    return points_cm[:MAX_POINT_CLOUD_POINTS], colors_rgb[:MAX_POINT_CLOUD_POINTS]
+    return points_cm, colors_rgb
 
 
 def _compute_headings_rad(traj_pts: np.ndarray) -> np.ndarray:
@@ -548,7 +585,6 @@ def _compute_headings_rad(traj_pts: np.ndarray) -> np.ndarray:
     if n == 1:
         return np.zeros(1, dtype=np.float64)
 
-    # Use finite differences with a +/- 3 frame window to suppress jitter
     headings = np.zeros(n, dtype=np.float64)
     last_valid_heading = 0.0
     for i in range(n):
@@ -580,14 +616,12 @@ def build_scene_3d_payload(
     grid_size = max(8, int(grid_size))
     cameras = load_all_cameras(calib_dir)
 
-    # Normalize estimated_df columns
     est_df = estimated_df.copy()
     est_df.columns = [str(c).strip() for c in est_df.columns]
     est_df = est_df.sort_values("Frame").reset_index(drop=True)
     traj_pts = est_df[["Loc_X", "Loc_Y", "Loc_Z"]].to_numpy(dtype=np.float64)
     frame_indices = est_df["Frame"].astype(int).to_numpy()
 
-    # Optional Ground Truth mapping
     has_gt = ground_truth_df is not None and not ground_truth_df.empty
     gt_map: Dict[int, np.ndarray] = {}
     gt_pts_all: List[np.ndarray] = []
@@ -603,7 +637,6 @@ def build_scene_3d_payload(
             gt_map[f_id] = pt
             gt_pts_all.append(pt)
 
-    # Compute scene bounds in UE5_cm from trajectory + cameras
     all_xyz_list: List[np.ndarray] = []
     if len(traj_pts) > 0:
         all_xyz_list.append(traj_pts)
@@ -649,7 +682,6 @@ def build_scene_3d_payload(
             500.0,
         ]
 
-    # Extract reference RGB frame + thumbnail for each camera
     ref_frame = int(frame_indices[min(100, len(frame_indices) - 1)]) if len(frame_indices) > 0 else 0
     cam_frames: Dict[int, np.ndarray] = {}
     cameras_payload: Dict[str, Any] = {}
@@ -691,18 +723,26 @@ def build_scene_3d_payload(
             "thumbnail_b64": thumb_b64,
         }
 
-    # Build continuous 3D valley elevation mesh (rows x cols)
-    anchor_pts = (
-        np.vstack([traj_pts, np.asarray(gt_pts_all, dtype=np.float64)])
-        if (has_gt and len(gt_pts_all) > 0 and len(traj_pts) > 0)
-        else traj_pts
+    # Load or compute Depth-Anything-V2-Metric-Outdoor relief maps
+    relief_maps, depth_model_used = _load_or_compute_neural_relief_maps(
+        calib_dir=calib_dir,
+        cameras=cameras,
+        cam_frames=cam_frames,
+        use_depth_model=use_depth_model,
     )
-    rbf_surface = _build_terrain_rbf(anchor_pts, cameras, bounds_cm)
+
+    # Build unified physically-grounded elevation surface Z(X, Y)
+    evaluate_z = _build_unified_terrain_evaluator(
+        traj_pts=traj_pts,
+        cameras=cameras,
+        relief_maps=relief_maps,
+        ref_frame=ref_frame,
+    )
 
     x_grid = np.linspace(x_min, x_max, grid_size, dtype=np.float64)
     y_grid = np.linspace(y_min, y_max, grid_size, dtype=np.float64)
     xx, yy = np.meshgrid(x_grid, y_grid)
-    zz = np.clip(rbf_surface(xx, yy), 200.0, 8500.0)
+    zz = evaluate_z(xx, yy)
 
     z_matrix_cm: List[List[float]] = []
     rgb_matrix: List[List[List[int]]] = []
@@ -736,19 +776,18 @@ def build_scene_3d_payload(
         "rgb_matrix": rgb_matrix,
     }
 
-    # Build calibrated point cloud
-    pts_cloud, cols_cloud, depth_model_used = _compute_calibrated_depth_point_cloud(
-        calib_dir=calib_dir,
+    # Build point cloud 100% locked onto the terrain_mesh surface
+    pts_cloud, cols_cloud = _build_locked_surface_point_cloud(
         cameras=cameras,
         cam_frames=cam_frames,
         traj_pts=traj_pts,
-        rbf_surface=rbf_surface,
+        x_grid=x_grid,
+        y_grid=y_grid,
+        zz_mesh=zz,
         bounds_cm=bounds_cm,
-        use_depth_model=use_depth_model,
         ref_frame=ref_frame,
     )
 
-    # Compute per-frame trajectory states, active sightline rays, and dynamic cameras
     headings = _compute_headings_rad(traj_pts)
     frames_payload: List[Dict[str, Any]] = []
 
@@ -772,11 +811,9 @@ def build_scene_3d_payload(
             ]
             error_cm = round(float(np.linalg.norm(est_pt - gt_pt)), 2)
 
-        # Build active camera sightline rays for this frame
         active_rays: List[Dict[str, Any]] = []
         if grouped_detections is not None:
             obs_list = grouped_detections.get(f_int, [])
-            # Keep highest-confidence detection per camera
             best_by_cam: Dict[int, Dict[str, float]] = {}
             for obs in obs_list:
                 cid = int(obs.get("cam_id", -1))
@@ -793,7 +830,6 @@ def build_scene_3d_payload(
                 ray_dir = _pixel_to_ray(cam_m, u_val, v_val)
                 dist_to_est = float(np.linalg.norm(est_pt - cam_m.loc))
                 ray_end = cam_m.loc + ray_dir * max(1000.0, dist_to_est)
-                # If ray passes near estimated 3D position, snap end_cm to est_pos_cm for clean intersection visual
                 if float(np.linalg.norm(ray_end - est_pt)) < 1500.0:
                     end_cm_list = est_pos_list
                 else:
@@ -820,7 +856,6 @@ def build_scene_3d_payload(
                     "conf": round(conf_val, 3),
                 })
         else:
-            # Synthesize geometric visibility rays when grouped_detections is not provided
             for cid, timeline in sorted(cameras.items()):
                 cam_m = timeline.get_model(f_int)
                 u_p, v_p, z_c = cam_m.project_point(est_pt)
@@ -844,7 +879,6 @@ def build_scene_3d_payload(
                         "conf": 1.0,
                     })
 
-        # Populate dynamic_cameras for cameras whose pose changes over time (Cam 5)
         dynamic_cameras_frame: Dict[str, Any] = {}
         for cid in dynamic_cam_ids:
             cam_m = cameras[cid].get_model(f_int)
@@ -866,7 +900,6 @@ def build_scene_3d_payload(
             "dynamic_cameras": dynamic_cameras_frame,
         })
 
-    # Compute or normalize metrics dictionary
     metrics_payload: Dict[str, Any] = {
         "mae_3d": 0.0,
         "rmse_3d": 0.0,

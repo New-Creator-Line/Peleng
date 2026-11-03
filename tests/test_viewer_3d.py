@@ -168,6 +168,20 @@ def test_export_3d_viewer_html_validation_mode(tmp_path):
     assert "computeVertexNormals()" in html
     assert "SM_AA_track" in html
 
+    # Verify top header bar (#hud-header) is removed and collapsible HUD controls exist
+    assert "hud-header" not in html
+    assert "btn-collapse-left" in html
+    assert "btn-open-left" in html
+    assert "btn-toggle-left" in html
+    assert "btn-collapse-right" in html
+    assert "btn-open-right" in html
+    assert "btn-toggle-right" in html
+    assert "btn-toggle-ui" in html
+    assert "Камеры и Слои" in html
+    assert "Телеметрия" in html
+    assert "Скрыть панели (H)" in html
+    assert "KeyH" in html
+
     # Verify embedded JSON round-trip integrity
     embedded = _extract_embedded_json(html)
     assert embedded["meta"]["has_ground_truth"] is True

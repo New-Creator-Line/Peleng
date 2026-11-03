@@ -215,62 +215,21 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       z-index: 10;
     }
 
-    /* Top Header */
-    #hud-header {
-      position: absolute;
-      top: 14px;
-      left: 16px;
-      right: 16px;
-      height: 54px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 18px;
-    }
-
-    .brand-block {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .brand-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: var(--accent-cyan);
-      box-shadow: 0 0 10px var(--accent-cyan);
-    }
-
-    .brand-title {
-      font-size: 14px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      color: #f8fafc;
-    }
-
     .brand-subtitle {
       font-family: var(--font-mono);
       font-size: 11px;
       color: var(--text-muted);
     }
 
-    .header-badges {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
     .pill-badge {
       font-family: var(--font-mono);
-      font-size: 11px;
-      padding: 4px 10px;
+      font-size: 10px;
+      padding: 3px 8px;
       border-radius: 999px;
-      background: rgba(30, 41, 59, 0.75);
+      background: rgba(30, 41, 59, 0.78);
       border: 1px solid rgba(148, 163, 184, 0.25);
       color: var(--text-main);
+      display: inline-block;
     }
 
     .pill-badge.mode-gt {
@@ -283,18 +242,104 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       color: var(--accent-amber);
     }
 
+    /* Collapsible Panel Header & Floating Reopen Pills */
+    .panel-header-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(56, 189, 248, 0.2);
+    }
+
+    .panel-header-title {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .panel-collapse-btn {
+      background: rgba(30, 41, 59, 0.75);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .panel-collapse-btn:hover {
+      color: var(--accent-cyan);
+      border-color: var(--accent-cyan);
+      background: rgba(0, 245, 212, 0.12);
+    }
+
+    .hud-reopen-pill {
+      position: absolute;
+      top: 16px;
+      z-index: 12;
+      background: var(--panel-bg);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid var(--panel-border);
+      color: #f8fafc;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 8px 14px;
+      border-radius: 999px;
+      cursor: pointer;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      transition: all 0.2s ease;
+      display: none;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .hud-reopen-pill:hover {
+      border-color: var(--accent-cyan);
+      color: var(--accent-cyan);
+      background: rgba(15, 23, 42, 0.94);
+    }
+
+    .hud-reopen-pill.left-pill {
+      left: 16px;
+    }
+
+    .hud-reopen-pill.right-pill {
+      right: 16px;
+    }
+
+    .hud-reopen-pill.visible {
+      display: inline-flex;
+    }
+
     /* Left Controls Panel */
     #hud-left {
       position: absolute;
-      top: 80px;
+      top: 16px;
       left: 16px;
       width: 280px;
-      max-height: calc(100vh - 175px);
+      max-height: calc(100vh - 104px);
       overflow-y: auto;
       padding: 14px;
       display: flex;
       flex-direction: column;
       gap: 14px;
+      transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+    }
+
+    #hud-left.collapsed {
+      transform: translateX(calc(-100% - 24px));
+      opacity: 0;
+      pointer-events: none;
     }
 
     .section-title {
@@ -423,15 +468,30 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     /* Right Telemetry Panel */
     #hud-right {
       position: absolute;
-      top: 80px;
+      top: 16px;
       right: 16px;
       width: 310px;
-      max-height: calc(100vh - 175px);
+      max-height: calc(100vh - 104px);
       overflow-y: auto;
       padding: 14px;
       display: flex;
       flex-direction: column;
-      gap: 14px;
+      gap: 12px;
+      transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+    }
+
+    #hud-right.collapsed {
+      transform: translateX(calc(100% + 24px));
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .telemetry-badges {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-wrap: wrap;
     }
 
     .telemetry-grid {
@@ -544,7 +604,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     #fallback-banner {
       display: none;
       position: absolute;
-      top: 84px;
+      top: 20px;
       left: 50%;
       transform: translateX(-50%);
       padding: 10px 18px;
@@ -562,25 +622,21 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <div id="labels-container"></div>
   <div id="fallback-banner"></div>
 
-  <!-- Top Header -->
-  <header id="hud-header" class="hud-panel">
-    <div class="brand-block">
-      <div class="brand-dot"></div>
-      <div>
-        <div class="brand-title">ПЕЛЕНГ 2.0 // 3D TACTICAL TERRAIN &amp; TRAJECTORY RECONSTRUCTION</div>
-        <div class="brand-subtitle" id="header-sub">UE5_cm Left-Handed -&gt; Three.js Metric 3D Engine</div>
-      </div>
-    </div>
-    <div class="header-badges">
-      <span class="pill-badge" id="badge-depth-model">Depth: Depth-Anything-V2</span>
-      <span class="pill-badge" id="badge-mode">VALIDATION MODE</span>
-      <span class="pill-badge" id="badge-mae">MAE 3D: --</span>
-      <span class="pill-badge" id="badge-rmse">RMSE 3D: --</span>
-    </div>
-  </header>
+  <!-- Compact Floating Reopen Pill Buttons (shown when side panels are collapsed) -->
+  <button id="btn-open-left" data-toggle="btn-toggle-left" class="hud-reopen-pill left-pill" title="Показать панель камер и слоев">
+    ☰ Камеры и Слои
+  </button>
+  <button id="btn-open-right" data-toggle="btn-toggle-right" class="hud-reopen-pill right-pill" title="Показать панель телеметрии">
+    📊 Телеметрия
+  </button>
 
   <!-- Left Panel: Camera View Presets & Layer Visibility -->
   <aside id="hud-left" class="hud-panel">
+    <div class="panel-header-bar">
+      <span class="panel-header-title">☰ Камеры и Слои</span>
+      <button id="btn-collapse-left" class="panel-collapse-btn" title="Скрыть панель">[ — Скрыть ]</button>
+    </div>
+
     <div>
       <div class="section-title">Camera View Presets</div>
       <div class="preset-grid" id="camera-presets">
@@ -622,9 +678,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="slider-row">
           <div style="display:flex;justify-content:space-between;">
             <span>Point Cloud Size</span>
-            <span id="pt-size-label">2.2 px</span>
+            <span id="pt-size-label">2.6 px</span>
           </div>
-          <input type="range" id="slider-pt-size" min="0.5" max="8.0" step="0.1" value="2.2" />
+          <input type="range" id="slider-pt-size" min="0.5" max="8.0" step="0.1" value="2.6" />
         </div>
         <label class="layer-item">
           <span>Camera Frustums &amp; Badges</span>
@@ -666,6 +722,16 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
   <!-- Right Panel: Live Telemetry Readout -->
   <aside id="hud-right" class="hud-panel">
+    <div class="panel-header-bar">
+      <span class="panel-header-title">📊 Телеметрия</span>
+      <button id="btn-collapse-right" class="panel-collapse-btn" title="Скрыть панель">[ Скрыть — ]</button>
+    </div>
+
+    <div class="telemetry-badges">
+      <span class="pill-badge" id="badge-mode">VALIDATION MODE</span>
+      <span class="pill-badge" id="badge-depth-model">Depth: Depth-Anything-V2</span>
+    </div>
+
     <div>
       <div class="section-title">Live Target Telemetry (UE5_cm)</div>
       <div class="telemetry-grid">
@@ -741,6 +807,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       <option value="1" selected>1.0x</option>
       <option value="2">2.0x</option>
     </select>
+
+    <button class="hud-btn" id="btn-toggle-ui" title="Скрыть или показать боковые панели (клавиша H)">
+      Скрыть панели (H)
+    </button>
   </footer>
 
   <!-- Embedded Scene3DPayload Data -->
@@ -788,51 +858,113 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       return new THREE.Vector3(dx, dz, -dy).normalize();
     }
 
-    // Initialize Top Header & Static Metrics
-    document.getElementById('badge-depth-model').textContent =
-      `Depth: ${(meta.depth_model_used || 'Depth-Anything-V2').split('/').pop()}`;
+    // Initialize Mode & Static Accuracy Metrics (with defensive element guards)
+    const badgeDepthEl = document.getElementById('badge-depth-model');
+    if (badgeDepthEl) {
+      badgeDepthEl.textContent = `Depth: ${(meta.depth_model_used || 'Depth-Anything-V2').split('/').pop()}`;
+    }
 
     const badgeMode = document.getElementById('badge-mode');
     if (hasGT) {
-      badgeMode.textContent = 'VALIDATION (WITH GT)';
-      badgeMode.className = 'pill-badge mode-gt';
+      if (badgeMode) {
+        badgeMode.textContent = 'VALIDATION (WITH GT)';
+        badgeMode.className = 'pill-badge mode-gt';
+      }
     } else {
-      badgeMode.textContent = 'BLIND TEST MODE (NO GT)';
-      badgeMode.className = 'pill-badge mode-blind';
-      document.getElementById('toggle-gt-traj').checked = false;
-      document.getElementById('toggle-gt-traj').disabled = true;
-      document.getElementById('row-toggle-gt').style.opacity = '0.45';
-      document.getElementById('legend-gt-row').style.display = 'none';
-      document.getElementById('tel-gt-pos').textContent = 'N/A (Blind Test Mode)';
-      document.getElementById('tel-err').textContent = 'N/A';
+      if (badgeMode) {
+        badgeMode.textContent = 'BLIND TEST MODE (NO GT)';
+        badgeMode.className = 'pill-badge mode-blind';
+      }
+      const toggleGtEl = document.getElementById('toggle-gt-traj');
+      if (toggleGtEl) {
+        toggleGtEl.checked = false;
+        toggleGtEl.disabled = true;
+      }
+      const rowToggleGt = document.getElementById('row-toggle-gt');
+      if (rowToggleGt) rowToggleGt.style.opacity = '0.45';
+      const legendGtRow = document.getElementById('legend-gt-row');
+      if (legendGtRow) legendGtRow.style.display = 'none';
+      const telGtPos = document.getElementById('tel-gt-pos');
+      if (telGtPos) telGtPos.textContent = 'N/A (Blind Test Mode)';
+      const telErr = document.getElementById('tel-err');
+      if (telErr) telErr.textContent = 'N/A';
     }
 
-    if (typeof metrics.mae_3d === 'number') {
-      const maeCm = metrics.mae_3d.toFixed(1);
-      const maeM = (metrics.mae_3d / 100.0).toFixed(2);
-      document.getElementById('badge-mae').textContent = `MAE 3D: ${maeCm} cm (${maeM} m)`;
-      document.getElementById('sum-mae3d').textContent = `${maeCm} cm (${maeM} m)`;
-    } else {
-      document.getElementById('badge-mae').textContent = 'MAE 3D: N/A';
-      document.getElementById('sum-mae3d').textContent = 'N/A';
+    const sumMaeEl = document.getElementById('sum-mae3d');
+    if (sumMaeEl) {
+      if (typeof metrics.mae_3d === 'number') {
+        const maeCm = metrics.mae_3d.toFixed(1);
+        const maeM = (metrics.mae_3d / 100.0).toFixed(2);
+        sumMaeEl.textContent = `${maeCm} cm (${maeM} m)`;
+      } else {
+        sumMaeEl.textContent = 'N/A';
+      }
     }
 
-    if (typeof metrics.rmse_3d === 'number') {
-      const rmseCm = metrics.rmse_3d.toFixed(1);
-      const rmseM = (metrics.rmse_3d / 100.0).toFixed(2);
-      document.getElementById('badge-rmse').textContent = `RMSE 3D: ${rmseCm} cm (${rmseM} m)`;
-      document.getElementById('sum-rmse3d').textContent = `${rmseCm} cm (${rmseM} m)`;
-    } else {
-      document.getElementById('badge-rmse').textContent = 'RMSE 3D: N/A';
-      document.getElementById('sum-rmse3d').textContent = 'N/A';
+    const sumRmseEl = document.getElementById('sum-rmse3d');
+    if (sumRmseEl) {
+      if (typeof metrics.rmse_3d === 'number') {
+        const rmseCm = metrics.rmse_3d.toFixed(1);
+        const rmseM = (metrics.rmse_3d / 100.0).toFixed(2);
+        sumRmseEl.textContent = `${rmseCm} cm (${rmseM} m)`;
+      } else {
+        sumRmseEl.textContent = 'N/A';
+      }
     }
 
-    if (typeof metrics.mae_x === 'number') {
-      document.getElementById('sum-axes').textContent =
-        `${metrics.mae_x.toFixed(1)} / ${(metrics.mae_y || 0).toFixed(1)} / ${(metrics.mae_z || 0).toFixed(1)} cm`;
-    } else {
-      document.getElementById('sum-axes').textContent = 'N/A (Blind Test)';
+    const sumAxesEl = document.getElementById('sum-axes');
+    if (sumAxesEl) {
+      if (typeof metrics.mae_x === 'number') {
+        sumAxesEl.textContent =
+          `${metrics.mae_x.toFixed(1)} / ${(metrics.mae_y || 0).toFixed(1)} / ${(metrics.mae_z || 0).toFixed(1)} cm`;
+      } else {
+        sumAxesEl.textContent = 'N/A (Blind Test)';
+      }
     }
+
+    // Collapsible Side Panels Logic
+    const hudLeft = document.getElementById('hud-left');
+    const hudRight = document.getElementById('hud-right');
+    const btnCollapseLeft = document.getElementById('btn-collapse-left');
+    const btnOpenLeft = document.getElementById('btn-open-left');
+    const btnCollapseRight = document.getElementById('btn-collapse-right');
+    const btnOpenRight = document.getElementById('btn-open-right');
+    const btnToggleUi = document.getElementById('btn-toggle-ui');
+
+    function syncPanelToggleButtons() {
+      const leftCollapsed = hudLeft.classList.contains('collapsed');
+      const rightCollapsed = hudRight.classList.contains('collapsed');
+      btnOpenLeft.classList.toggle('visible', leftCollapsed);
+      btnOpenRight.classList.toggle('visible', rightCollapsed);
+      if (btnToggleUi) {
+        const bothHidden = leftCollapsed && rightCollapsed;
+        btnToggleUi.textContent = bothHidden ? 'Показать панели (H)' : 'Скрыть панели (H)';
+        btnToggleUi.classList.toggle('active', bothHidden);
+      }
+    }
+
+    function setLeftPanelCollapsed(collapsed) {
+      hudLeft.classList.toggle('collapsed', Boolean(collapsed));
+      syncPanelToggleButtons();
+    }
+
+    function setRightPanelCollapsed(collapsed) {
+      hudRight.classList.toggle('collapsed', Boolean(collapsed));
+      syncPanelToggleButtons();
+    }
+
+    function toggleBothSidePanels() {
+      const anyVisible =
+        !hudLeft.classList.contains('collapsed') || !hudRight.classList.contains('collapsed');
+      setLeftPanelCollapsed(anyVisible);
+      setRightPanelCollapsed(anyVisible);
+    }
+
+    if (btnCollapseLeft) btnCollapseLeft.addEventListener('click', () => setLeftPanelCollapsed(true));
+    if (btnOpenLeft) btnOpenLeft.addEventListener('click', () => setLeftPanelCollapsed(false));
+    if (btnCollapseRight) btnCollapseRight.addEventListener('click', () => setRightPanelCollapsed(true));
+    if (btnOpenRight) btnOpenRight.addEventListener('click', () => setRightPanelCollapsed(false));
+    if (btnToggleUi) btnToggleUi.addEventListener('click', toggleBothSidePanels);
 
     // Setup Scene, Camera, and Renderer with logarithmicDepthBuffer
     const container = document.getElementById('canvas-container');
@@ -840,7 +972,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0b0f19);
-    scene.fog = new THREE.FogExp2(0x0b0f19, 0.00038);
+    scene.fog = new THREE.FogExp2(0x0b0f19, 0.00032);
 
     const camera = new THREE.PerspectiveCamera(
       48,
@@ -858,7 +990,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1;
+    renderer.toneMappingExposure = 1.18;
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -868,16 +1000,16 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     controls.minDistance = 4;
     controls.target.set(0, 5, 0);
 
-    // Lighting
-    const hemiLight = new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 1.15);
+    // Enhanced Lighting for Crisp Terrain & Point Cloud Cohesion
+    const hemiLight = new THREE.HemisphereLight(0xe0f2fe, 0x1e293b, 1.35);
     hemiLight.position.set(0, 500, 0);
     scene.add(hemiLight);
 
-    const dirLight = new THREE.DirectionalLight(0xfffbeb, 1.35);
+    const dirLight = new THREE.DirectionalLight(0xfffbeb, 1.55);
     dirLight.position.set(220, 420, 180);
     scene.add(dirLight);
 
-    const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.4);
+    const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.55);
     fillLight.position.set(-250, 180, -200);
     scene.add(fillLight);
 
@@ -946,8 +1078,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
       const material = new THREE.MeshStandardMaterial({
         vertexColors: true,
-        roughness: 0.85,
-        metalness: 0.06,
+        roughness: 0.78,
+        metalness: 0.05,
         side: THREE.DoubleSide
       });
 
@@ -985,7 +1117,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       for (let i = 0; i < n; i++) {
         const v3 = ueToThree(pts[i]);
         positions[i * 3] = v3.x;
-        positions[i * 3 + 1] = v3.y;
+        positions[i * 3 + 1] = v3.y + 0.08;
         positions[i * 3 + 2] = v3.z;
 
         const c = cols[i] || [120, 145, 110];
@@ -999,11 +1131,11 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
       pointCloudMaterial = new THREE.PointsMaterial({
-        size: 2.2,
+        size: 2.6,
         vertexColors: true,
         sizeAttenuation: true,
         transparent: true,
-        opacity: 0.88
+        opacity: 0.94
       });
 
       pointCloudObj = new THREE.Points(geom, pointCloudMaterial);
@@ -1533,6 +1665,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       if (e.code === 'Space') {
         e.preventDefault();
         togglePlay();
+      } else if (e.code === 'KeyH') {
+        e.preventDefault();
+        toggleBothSidePanels();
       } else if (e.code === 'ArrowLeft') {
         isPlaying = false;
         btnPlay.textContent = 'PLAY';

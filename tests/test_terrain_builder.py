@@ -6,8 +6,11 @@ import pandas as pd
 import pytest
 
 from src.evaluator import load_ground_truth
-from src.mock_detections import load_detections
-from src.terrain_builder import FRUSTUM_DISTANCE_CM, build_scene_3d_payload
+from src.terrain_builder import (
+    FRUSTUM_DISTANCE_CM,
+    _bilinear_interpolate_mesh,
+    build_scene_3d_payload,
+)
 
 
 HACKATHON_DIR = os.path.join(
@@ -47,10 +50,28 @@ def _create_synthetic_calib_dir(tmp_dir: str) -> None:
         f.write(header5 + "".join(rows5))
 
 
+def _assert_mesh_and_point_cloud_locked(payload: dict, max_tol_cm: float = 40.0) -> None:
+    """
+    Verifies that every 3D point in `point_cloud["points_cm"]` lies directly on
+    the bilinearly interpolated `terrain_mesh["z_matrix_cm"]` surface within `max_tol_cm`.
+    """
+    mesh = payload["terrain_mesh"]
+    x_grid = np.asarray(mesh["x_grid_cm"], dtype=np.float64)
+    y_grid = np.asarray(mesh["y_grid_cm"], dtype=np.float64)
+    zz_mesh = np.asarray(mesh["z_matrix_cm"], dtype=np.float64)
+
+    pts = np.asarray(payload["point_cloud"]["points_cm"], dtype=np.float64)
+    assert len(pts) > 100
+    z_interp = _bilinear_interpolate_mesh(pts[:, 0], pts[:, 1], x_grid, y_grid, zz_mesh)
+    abs_diff = np.abs(pts[:, 2] - z_interp)
+    max_diff = float(np.max(abs_diff))
+    assert max_diff <= max_tol_cm, f"Point cloud detached from terrain mesh by {max_diff:.1f} cm!"
+
+
 def test_schema_and_validation_mode_synthetic():
     """
     Verifies full Scene3DPayload schema compliance in Validation Mode (with ground_truth_df)
-    on a self-contained synthetic calibration directory.
+    on a self-contained synthetic calibration directory, including 100% mesh-to-point-cloud locking.
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         _create_synthetic_calib_dir(tmp_dir)
@@ -82,11 +103,9 @@ def test_schema_and_validation_mode_synthetic():
             grid_size=24,
         )
 
-        # 1. Top-level keys
         for key in ("meta", "metrics", "terrain_mesh", "point_cloud", "cameras", "frames"):
             assert key in payload
 
-        # 2. Meta verification
         meta = payload["meta"]
         assert meta["coord_system"] == "UE5_cm"
         assert meta["num_frames"] == 3
@@ -95,7 +114,6 @@ def test_schema_and_validation_mode_synthetic():
         for b_key in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max"):
             assert b_key in meta["bounds_cm"]
 
-        # 3. Terrain mesh verification
         mesh = payload["terrain_mesh"]
         assert mesh["rows"] == 24
         assert mesh["cols"] == 24
@@ -107,14 +125,8 @@ def test_schema_and_validation_mode_synthetic():
         assert len(mesh["rgb_matrix"][0]) == 24
         assert len(mesh["rgb_matrix"][0][0]) == 3
 
-        # 4. Point cloud verification
-        pc = payload["point_cloud"]
-        assert len(pc["points_cm"]) > 100
-        assert len(pc["points_cm"]) == len(pc["colors_rgb"])
-        assert len(pc["points_cm"][0]) == 3
-        assert len(pc["colors_rgb"][0]) == 3
+        _assert_mesh_and_point_cloud_locked(payload, max_tol_cm=25.0)
 
-        # 5. Cameras & frustum geometry verification
         cams = payload["cameras"]
         assert "1" in cams and "5" in cams
         assert cams["1"]["is_dynamic"] is False
@@ -128,7 +140,6 @@ def test_schema_and_validation_mode_synthetic():
             dist = float(np.linalg.norm(corner - pos1))
             assert math.isclose(dist, FRUSTUM_DISTANCE_CM, rel_tol=1e-2)
 
-        # 6. Frames & dynamic camera 5 rotation verification
         frames = payload["frames"]
         assert len(frames) == 3
         assert frames[0]["gt_pos_cm"] is not None
@@ -136,7 +147,6 @@ def test_schema_and_validation_mode_synthetic():
         assert len(frames[0]["active_rays"]) == 1
         assert frames[0]["active_rays"][0]["cam_id"] == 1
 
-        # Verify dynamic camera 5 changes forward direction across frames 0 and 2
         dyn0 = frames[0]["dynamic_cameras"]["5"]
         dyn2 = frames[2]["dynamic_cameras"]["5"]
         assert dyn0["forward"] != dyn2["forward"]
@@ -171,6 +181,7 @@ def test_blind_test_mode_without_ground_truth():
             assert frame_entry["gt_pos_cm"] is None
             assert frame_entry["error_cm"] is None
             assert len(frame_entry["est_pos_cm"]) == 3
+        _assert_mesh_and_point_cloud_locked(payload, max_tol_cm=25.0)
 
 
 @pytest.mark.skipif(
@@ -180,10 +191,12 @@ def test_blind_test_mode_without_ground_truth():
 def test_real_hackathon_dataset_integration():
     """
     Tests end-to-end terrain & calibrated depth point cloud generation on the
-    real Peleng `хакатон` cameras and MP4 videos.
+    real Peleng `хакатон` cameras and MP4 videos, verifying:
+    1. Point cloud is 100% locked onto the terrain mesh (`<= 25 cm`).
+    2. Valley floor along the road is at natural road elevation (`Z < 900 cm`), not pulled into a dome.
     """
     gt_csv = os.path.join(HACKATHON_DIR, "object_transform_SM_AA_track.csv")
-    gt_df = load_ground_truth(gt_csv).iloc[:30].copy()
+    gt_df = load_ground_truth(gt_csv).iloc[:60].copy()
     est_df = gt_df[["Frame", "Loc_X", "Loc_Y", "Loc_Z"]].copy()
 
     payload = build_scene_3d_payload(
@@ -192,12 +205,26 @@ def test_real_hackathon_dataset_integration():
         ground_truth_df=gt_df,
         grouped_detections=None,
         use_depth_model=True,
-        grid_size=36,
+        grid_size=48,
     )
 
     assert len(payload["cameras"]) == 5
     assert payload["cameras"]["5"]["is_dynamic"] is True
-    assert payload["terrain_mesh"]["rows"] == 36
-    assert payload["terrain_mesh"]["cols"] == 36
+    assert payload["terrain_mesh"]["rows"] == 48
+    assert payload["terrain_mesh"]["cols"] == 48
     assert len(payload["point_cloud"]["points_cm"]) >= 500
-    assert len(payload["frames"]) == 30
+    assert len(payload["frames"]) == 60
+
+    # Verify point cloud is locked directly to the terrain mesh surface
+    _assert_mesh_and_point_cloud_locked(payload, max_tol_cm=25.0)
+
+    # Verify trajectory points sit cleanly on the valley floor (no artificial floating dome)
+    mesh = payload["terrain_mesh"]
+    x_grid = np.asarray(mesh["x_grid_cm"], dtype=np.float64)
+    y_grid = np.asarray(mesh["y_grid_cm"], dtype=np.float64)
+    zz_mesh = np.asarray(mesh["z_matrix_cm"], dtype=np.float64)
+    traj_xy = est_df[["Loc_X", "Loc_Y"]].to_numpy(dtype=np.float64)
+    traj_z = est_df["Loc_Z"].to_numpy(dtype=np.float64)
+    z_mesh_at_road = _bilinear_interpolate_mesh(traj_xy[:, 0], traj_xy[:, 1], x_grid, y_grid, zz_mesh)
+    road_to_mesh_diff = float(np.median(np.abs(z_mesh_at_road - traj_z)))
+    assert road_to_mesh_diff < 120.0, f"Road detached from valley floor by {road_to_mesh_diff:.1f} cm!"
