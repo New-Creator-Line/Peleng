@@ -220,6 +220,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 
+<<<<<<< Updated upstream
 # Machine Learning weights, checkpoints and training runs
 *.pt
 *.pth
@@ -240,3 +241,11 @@ results/videos/
 # Compiled C++ Python extensions and build artifacts
 *.pyd
 build/
+=======
+# Datasets, training runs, archives and weights
+dataset/
+dataset*/
+runs/
+*.zip
+*.pt
+>>>>>>> Stashed changes
