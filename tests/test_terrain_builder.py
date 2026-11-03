@@ -106,8 +106,8 @@ def test_schema_and_validation_mode_synthetic():
         for key in ("meta", "metrics", "terrain_mesh", "point_cloud", "cameras", "frames"):
             assert key in payload
         assert "tree_cloud" in payload
-        assert "points_cm" in payload["tree_cloud"]
-        assert "colors_rgb" in payload["tree_cloud"]
+        assert payload["tree_cloud"]["points_cm"] == []
+        assert payload["tree_cloud"]["colors_rgb"] == []
 
         meta = payload["meta"]
         assert meta["coord_system"] == "UE5_cm"
@@ -247,4 +247,40 @@ def test_no_artificial_hills_under_camera2():
         grid_size=32,
     )
     assert "tree_cloud" in payload
-    assert len(payload["tree_cloud"]["points_cm"]) > 0
+    assert len(payload["tree_cloud"]["points_cm"]) == 0
+
+
+def test_terrain_evaluator_smooth_valley_no_ripples():
+    """
+    Verifies that _build_unified_terrain_evaluator produces a smooth, unwarped valley floor:
+    1. Zero sinusoidal ripples away from the road.
+    2. Road trajectory anchors match elevation.
+    3. Flat, smoothly interpolated ground without artificial bumps.
+    """
+    from src.terrain_builder import _build_unified_terrain_evaluator
+
+    traj_pts = np.array([
+        [-20000.0, -10000.0, 350.0],
+        [-10000.0, -5000.0, 380.0],
+        [0.0, 0.0, 420.0],
+        [10000.0, 5000.0, 450.0],
+    ], dtype=np.float64)
+
+    evaluator = _build_unified_terrain_evaluator(
+        traj_pts=traj_pts,
+        cameras={},
+        relief_maps={},
+    )
+
+    # Road anchors evaluation
+    z_road = evaluator(traj_pts[:, 0], traj_pts[:, 1])
+    np.testing.assert_allclose(z_road, traj_pts[:, 2], atol=15.0)
+
+    # Off-road grid: ensure smooth gradient and no sinusoidal oscillations
+    x_off = np.linspace(-30000.0, 30000.0, 100)
+    y_off = np.full_like(x_off, 15000.0)
+    z_off = evaluator(x_off, y_off)
+
+    # Second derivative should be tiny without high-frequency sinusoidal ripple
+    d2z = np.diff(z_off, n=2)
+    assert np.max(np.abs(d2z)) < 5.0, "Terrain surface shows high-frequency ripples or bumps!"

@@ -301,11 +301,7 @@ def _build_unified_terrain_evaluator(
     that guarantees:
       1. Valley Floor Base (`z_valley`): Smooth IDW interpolation along the road trajectory
          (`Z in [300, 718] cm`), keeping the valley floor flat/gently graded at the true road level.
-      2. Localized Camera Hills (`dz_hills`): Smooth Gaussian hills ONLY around each camera
-         (`sigma = 8500 cm` for high mountain cameras Cam 2 & 4, `sigma = 4000 cm` for valley
-         cameras Cam 1, 3, 5), masked by `road_mask` so hills never bury the road.
-      3. Neural Depth Micro-Relief (`dz_depth`): Real local terrain relief (+/- 120 cm) from
-         `Depth-Anything-V2-Metric-Outdoor-Small-hf` projected onto the valley surface.
+      2. Zero artificial ripples, bumps, or perspective warping: perfectly smooth, clean valley base.
     """
     if len(traj_pts) > 0:
         step = max(1, len(traj_pts) // 80)
@@ -329,61 +325,13 @@ def _build_unified_terrain_evaluator(
         d_min = np.sqrt(np.min(d2, axis=1))
         return z_val, d_min
 
-    priority_cams = [2, 4, 1, 3, 5]
-
     def evaluate_z(x_in: np.ndarray, y_in: np.ndarray) -> np.ndarray:
         orig_shape = np.shape(x_in)
         x_flat = np.asarray(x_in, dtype=np.float64).ravel()
         y_flat = np.asarray(y_in, dtype=np.float64).ravel()
 
-        z_valley, d_min_road = _eval_valley_base(x_flat, y_flat)
-        road_mask = 1.0 - np.exp(-((d_min_road / 2200.0) ** 2))
-        z_macro = z_valley
-
-        # Add subtle natural ridge undulations away from the road
-        undulation = (
-            35.0 * np.sin(x_flat * 0.00018) * np.cos(y_flat * 0.00022) * road_mask
-        )
-        z_total = z_macro + undulation
-
-        # Project into neural depth relief maps if available
-        if relief_maps:
-            dz_relief = np.zeros_like(z_total)
-            covered = np.zeros(len(z_total), dtype=bool)
-            pts_3d = np.stack([x_flat, y_flat, z_total], axis=1)
-
-            for cid in priority_cams:
-                if cid not in cameras or cid not in relief_maps:
-                    continue
-                rmap = relief_maps[cid]
-                rh, rw = rmap.shape
-                cam_m = cameras[cid].get_model(ref_frame)
-                w_px = float(cam_m.image_width_px)
-                h_px = float(cam_m.image_height_px)
-
-                # Vectorized camera projection: pt_cam = (pts_3d - loc) @ R_cam.T
-                pts_cam = (pts_3d - cam_m.loc[None, :]) @ cam_m.R_cam.T
-                z_c = pts_cam[:, 2]
-                valid = (~covered) & (z_c > 250.0)
-                if not np.any(valid):
-                    continue
-
-                fx, fy, cx_p, cy_p = cam_m.get_intrinsics()
-                u = fx * (pts_cam[valid, 0] / z_c[valid]) + cx_p
-                v = fy * (pts_cam[valid, 1] / z_c[valid]) + cy_p
-
-                in_fov = (u >= 0.0) & (u < w_px - 1.0) & (v >= 0.25 * h_px) & (v < h_px - 1.0)
-                if not np.any(in_fov):
-                    continue
-
-                valid_indices = np.flatnonzero(valid)[in_fov]
-                ui = np.clip((u[in_fov] / w_px * rw).astype(int), 0, rw - 1)
-                vi = np.clip((v[in_fov] / h_px * rh).astype(int), 0, rh - 1)
-                dz_relief[valid_indices] = rmap[vi, ui]
-                covered[valid_indices] = True
-
-            z_total = z_total + road_mask * dz_relief
-
+        z_valley, _ = _eval_valley_base(x_flat, y_flat)
+        z_total = z_valley
         z_clamped = np.clip(z_total, 200.0, 8500.0)
         return z_clamped.reshape(orig_shape)
 
@@ -912,35 +860,6 @@ def build_scene_3d_payload(
         "bounds_cm": bounds_cm,
     }
 
-    # Extract foliage & tree points if available, otherwise safe fallback
-    tree_pts_list: List[List[float]] = []
-    tree_cols_list: List[List[int]] = []
-    if len(pts_cloud) > 0 and len(traj_pts) > 0:
-        # Sample realistic tree canopy clusters along road borders in valley
-        r_xy = traj_pts[:, :2]
-        r_z = traj_pts[:, 2]
-        step_tr = max(1, len(r_xy) // 40)
-        np.random.seed(42)
-        for idx in range(0, len(r_xy), step_tr):
-            pt = r_xy[idx]
-            base_z = float(r_z[idx])
-            for side in [-1.0, 1.0]:
-                offset = side * (600.0 + np.random.uniform(100.0, 500.0))
-                tx = pt[0] + offset
-                ty = pt[1] + np.random.uniform(-100.0, 100.0)
-                tz = base_z + np.random.uniform(180.0, 450.0)
-                for _ in range(6):
-                    tree_pts_list.append([
-                        round(float(tx + np.random.uniform(-80.0, 80.0)), 2),
-                        round(float(ty + np.random.uniform(-80.0, 80.0)), 2),
-                        round(float(tz + np.random.uniform(-60.0, 60.0)), 2),
-                    ])
-                    tree_cols_list.append([
-                        int(np.random.randint(28, 48)),
-                        int(np.random.randint(110, 155)),
-                        int(np.random.randint(35, 65)),
-                    ])
-
     return {
         "meta": meta_payload,
         "metrics": metrics_payload,
@@ -950,8 +869,8 @@ def build_scene_3d_payload(
             "colors_rgb": cols_cloud,
         },
         "tree_cloud": {
-            "points_cm": tree_pts_list,
-            "colors_rgb": tree_cols_list,
+            "points_cm": [],
+            "colors_rgb": [],
         },
         "cameras": cameras_payload,
         "frames": frames_payload,

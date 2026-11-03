@@ -187,8 +187,9 @@ def test_export_3d_viewer_html_validation_mode(tmp_path):
     assert "select-traj-style" in html
     assert "toggle-road" in html
     assert "<span>3D Roadway</span>" in html
-    assert "toggle-trees" in html
-    assert "Деревья и кроны (Tree Foliage)" in html
+    assert "toggle-trees" not in html
+    assert "Деревья и кроны" not in html
+    assert "treeCloudObj" not in html
     assert "3D Roadway & Scenery" not in html
     assert "FBXLoader" in html
     assert "three/addons/loaders/FBXLoader.js" in html
@@ -369,8 +370,8 @@ def test_load_cargo_truck_fbx_b64_fallback(monkeypatch):
     assert result == ""
 
 
-def test_export_3d_viewer_html_tree_cloud_layer_and_toggle(tmp_path):
-    """Verifies that tree_cloud point cloud and toggle-trees checkbox are correctly rendered."""
+def test_export_3d_viewer_html_no_fake_floating_tree_cloud(tmp_path):
+    """Verifies that fake floating tree point clouds and toggle-trees checkbox are eliminated."""
     payload = _make_mock_scene_payload(has_ground_truth=True)
     payload["tree_cloud"] = {
         "points_cm": [
@@ -389,39 +390,25 @@ def test_export_3d_viewer_html_tree_cloud_layer_and_toggle(tmp_path):
     export_3d_viewer_html(payload, str(out_file))
     html = out_file.read_text(encoding="utf-8")
 
-    # 1. Verify UI toggle checkbox
-    assert "toggle-trees" in html
-    assert 'id="toggle-trees"' in html
-    assert "Деревья и кроны (Tree Foliage)" in html
+    # 1. Verify UI toggle checkbox is removed
+    assert "toggle-trees" not in html
+    assert 'id="toggle-trees"' not in html
+    assert "Деревья и кроны" not in html
 
-    # 2. Verify Three.js point cloud logic and coordinate transformations
-    assert "SCENE_DATA.tree_cloud && SCENE_DATA.tree_cloud.points_cm" in html
-    assert "treeCloudObj" in html
-    assert "const x = (x_ue - cx) / 100.0;" in html
-    assert "const y = (z_ue - cz) / 100.0;" in html
-    assert "const z = (y_ue - cy) / 100.0;" in html
-    assert "size: 1.8" in html
-    assert "vertexColors: true" in html
-    assert "scene.add(treeCloudObj);" in html
-    assert "if (treeCloudObj) treeCloudObj.visible = e.target.checked;" in html
-
-    # 3. Verify embedded JSON contains tree_cloud points and colors
-    embedded = _extract_embedded_json(html)
-    assert "tree_cloud" in embedded
-    assert len(embedded["tree_cloud"]["points_cm"]) == 3
-    assert embedded["tree_cloud"]["points_cm"][0] == [-12400.5, -4300.2, 550.0]
-    assert embedded["tree_cloud"]["colors_rgb"][0] == [46, 125, 50]
+    # 2. Verify Three.js point cloud logic for fake trees is removed
+    assert "treeCloudObj" not in html
 
 
 def test_export_3d_viewer_html_tree_cloud_variations_graceful(tmp_path):
-    """Verifies that missing, empty, None, and NumPy tree_cloud payloads are handled gracefully."""
+    """Verifies that missing, empty, None, and NumPy tree_cloud payloads are handled gracefully without generating tree controls."""
     # Case A: tree_cloud missing completely
     payload_missing = _make_mock_scene_payload(has_ground_truth=False)
     payload_missing.pop("tree_cloud", None)
     out_missing = tmp_path / "missing_tree.html"
     export_3d_viewer_html(payload_missing, str(out_missing))
     html_missing = out_missing.read_text(encoding="utf-8")
-    assert "toggle-trees" in html_missing
+    assert "toggle-trees" not in html_missing
+    assert "treeCloudObj" not in html_missing
     embedded_missing = _extract_embedded_json(html_missing)
     assert "tree_cloud" not in embedded_missing
 
@@ -431,7 +418,8 @@ def test_export_3d_viewer_html_tree_cloud_variations_graceful(tmp_path):
     out_none = tmp_path / "none_tree.html"
     export_3d_viewer_html(payload_none, str(out_none))
     html_none = out_none.read_text(encoding="utf-8")
-    assert "toggle-trees" in html_none
+    assert "toggle-trees" not in html_none
+    assert "treeCloudObj" not in html_none
     embedded_none = _extract_embedded_json(html_none)
     assert "tree_cloud" not in embedded_none
 
@@ -441,7 +429,8 @@ def test_export_3d_viewer_html_tree_cloud_variations_graceful(tmp_path):
     out_empty = tmp_path / "empty_tree.html"
     export_3d_viewer_html(payload_empty, str(out_empty))
     html_empty = out_empty.read_text(encoding="utf-8")
-    assert "toggle-trees" in html_empty
+    assert "toggle-trees" not in html_empty
+    assert "treeCloudObj" not in html_empty
     embedded_empty = _extract_embedded_json(html_empty)
     assert embedded_empty["tree_cloud"]["points_cm"] == []
     assert embedded_empty["tree_cloud"]["colors_rgb"] == []
@@ -455,7 +444,8 @@ def test_export_3d_viewer_html_tree_cloud_variations_graceful(tmp_path):
     out_numpy = tmp_path / "numpy_tree.html"
     export_3d_viewer_html(payload_numpy, str(out_numpy))
     html_numpy = out_numpy.read_text(encoding="utf-8")
-    assert "toggle-trees" in html_numpy
+    assert "toggle-trees" not in html_numpy
+    assert "treeCloudObj" not in html_numpy
     embedded_numpy = _extract_embedded_json(html_numpy)
     assert embedded_numpy["tree_cloud"]["points_cm"] == [[-12400.5, -4300.2, 550.0]]
     assert embedded_numpy["tree_cloud"]["colors_rgb"] == [[46, 125, 50]]
