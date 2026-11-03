@@ -8,7 +8,7 @@ import pandas as pd
 def plot_trajectory_comparison(
     estimated_df: pd.DataFrame,
     ground_truth_df: Optional[pd.DataFrame],
-    output_png_path: str = "results/trajectory_comparison.png",
+    output_png_path: str = "results/plots/trajectory_comparison.png",
 ) -> None:
     """
     Plots the final 3D trajectory comparison matching the exact styling

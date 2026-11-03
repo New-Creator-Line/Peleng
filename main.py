@@ -32,8 +32,9 @@ def run_pipeline(
     calib_dir: str,
     detections_csv: Optional[str] = None,
     gt_csv: Optional[str] = None,
-    output_csv: str = "results/output_trajectory.csv",
-    metrics_json: str = "results/metrics_summary.json",
+    output_csv: str = "results/trajectories/output_trajectory_yolo.csv",
+    metrics_json: str = "results/metrics/metrics_summary_yolo.json",
+    plot_path: str = "results/plots/trajectory_comparison.png",
     plot: bool = True,
     conf_threshold: float = 0.3,
     dt: float = 1.0 / 30.0,
@@ -58,7 +59,7 @@ def run_pipeline(
     if not detections_csv or not os.path.exists(detections_csv):
         if gt_csv and os.path.exists(gt_csv):
             print(f"[2/5] Detections file not found. Generating mock detections from GT: '{gt_csv}'...")
-            mock_path = "results/detections_2d.csv"
+            mock_path = "results/detections/detections_2d_mock.csv"
             generate_mock_detections(calib_dir, gt_csv, mock_path, noise_std_px=1.5)
             detections_csv = mock_path
             is_mock_mode = True
@@ -319,7 +320,6 @@ def run_pipeline(
         print("[5/5] Running in Blind Test mode (no Ground Truth provided).")
 
     if plot:
-        plot_path = "results/trajectory_comparison.png"
         print(f"      Generating Slide 8 comparison plot -> '{plot_path}'...")
         plot_trajectory_comparison(out_df, gt_df, plot_path)
         print(f"      Saved comparison plot: '{plot_path}'")
@@ -332,10 +332,27 @@ def run_pipeline(
 def main():
     parser = argparse.ArgumentParser(description="Peleng 3D Real-Time Tracking Core")
     parser.add_argument("--calib-dir", default="хакатон", help="Directory with camera calibration CSV files")
-    parser.add_argument("--detections", default="results/detections_2d.csv", help="Path to 2D detections CSV")
+    parser.add_argument(
+        "--detections",
+        default="results/detections/detections_2d_yolo_real.csv",
+        help="Path to 2D detections CSV",
+    )
     parser.add_argument("--gt", default="хакатон/object_transform_SM_AA_track.csv", help="Path to Ground Truth CSV (optional)")
-    parser.add_argument("--output", default="results/output_trajectory.csv", help="Output trajectory CSV file")
-    parser.add_argument("--metrics-out", default="results/metrics_summary.json", help="Output metrics JSON file")
+    parser.add_argument(
+        "--output",
+        default="results/trajectories/output_trajectory_yolo.csv",
+        help="Output trajectory CSV file",
+    )
+    parser.add_argument(
+        "--metrics-out",
+        default="results/metrics/metrics_summary_yolo.json",
+        help="Output metrics JSON file",
+    )
+    parser.add_argument(
+        "--plot-out",
+        default="results/plots/trajectory_comparison.png",
+        help="Output plot PNG file",
+    )
     parser.add_argument("--plot", action="store_true", default=True, help="Generate Slide 8 comparison plot")
     parser.add_argument("--no-plot", action="store_false", dest="plot", help="Disable plotting")
     parser.add_argument("--conf-threshold", type=float, default=0.3, help="Confidence threshold for 2D detections")
@@ -351,6 +368,7 @@ def main():
         gt_csv=gt_file,
         output_csv=args.output,
         metrics_json=args.metrics_out,
+        plot_path=args.plot_out,
         plot=args.plot,
         conf_threshold=args.conf_threshold,
     )

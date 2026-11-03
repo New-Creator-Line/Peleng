@@ -4,7 +4,7 @@ Process Multi-Camera Video Streams with Fine-Tuned YOLOv8x.
 Generates:
 1. Individual annotated videos for Cameras 1 to 5: results/videos/camera_{i}_yolo.mp4
 2. Synchronized 5-Camera Multi-View Dashboard: results/videos/multiview_dashboard_yolo.mp4
-3. Unified 2D Detections CSV: results/detections_2d_yolo_real.csv
+3. Unified 2D Detections CSV: results/detections/detections_2d_yolo_real.csv
 """
 
 import argparse
@@ -196,9 +196,9 @@ def process_all_videos(
     weights_path: str = "weights/peleng_yolov8x_best.pt",
     videos_dir: str = "хакатон",
     output_dir: str = "results/videos",
-    csv_output: str = "results/detections_2d_yolo_real.csv",
-    conf_threshold: float = 0.25,
-    imgsz: int = 640,
+    csv_output: str = "results/detections/detections_2d_yolo_real.csv",
+    conf_threshold: float = 0.35,
+    imgsz: int = 960,
     device: str = "0",
 ) -> Dict[str, Any]:
     """
@@ -370,9 +370,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weights", type=str, default="weights/peleng_yolov8x_best.pt")
     parser.add_argument("--videos_dir", type=str, default="хакатон")
     parser.add_argument("--output_dir", type=str, default="results/videos")
-    parser.add_argument("--csv", type=str, default="results/detections_2d_yolo_real.csv")
-    parser.add_argument("--conf", type=float, default=0.25)
-    parser.add_argument("--imgsz", type=int, default=640)
+    parser.add_argument("--csv", type=str, default="results/detections/detections_2d_yolo_real.csv")
+    parser.add_argument("--conf", type=float, default=0.35)
+    parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--device", type=str, default="0" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
 

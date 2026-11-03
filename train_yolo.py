@@ -31,7 +31,7 @@ logger = logging.getLogger("PelengYOLOTrainer")
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    data_yaml: str = "peleng.v1i.yolov8/data.yaml"
+    data_yaml: str = "dataset_v3/data.yaml"
     model_name: str = "yolov8x.pt"
     epochs: int = 50
     batch_size: int = 8
@@ -165,8 +165,8 @@ def train_yolov8(config: TrainingConfig) -> Dict[str, Any]:
         logger.warning(f"best.pt not found at {best_pt}")
 
     # Also save to results/
-    results_dir = Path("results")
-    results_dir.mkdir(exist_ok=True)
+    results_dir = Path("results/metrics")
+    results_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = results_dir / "yolo_metrics_summary.json"
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4)
@@ -178,7 +178,7 @@ def train_yolov8(config: TrainingConfig) -> Dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fine-tune YOLOv8 on Peleng Dataset")
     parser.add_argument("--model", type=str, default="yolov8x.pt", help="Pretrained YOLO model (default: yolov8x.pt)")
-    parser.add_argument("--data", type=str, default="peleng.v1i.yolov8/data.yaml", help="Path to data.yaml")
+    parser.add_argument("--data", type=str, default="dataset_v3/data.yaml", help="Path to data.yaml")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--batch", type=int, default=8, help="Batch size (default: 8)")
     parser.add_argument("--imgsz", type=int, default=512, help="Image resolution (default: 512)")
