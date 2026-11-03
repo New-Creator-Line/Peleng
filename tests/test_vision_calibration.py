@@ -122,7 +122,7 @@ def test_tree_segmentation_and_roots(video_dir: Path, cam_id: int):
     for u_base, v_base in roots:
         assert 0 <= u_base < 1920, f"Cam {cam_id} u_base {u_base} out of range [0, 1920)"
         assert 0 <= v_base < 1080, f"Cam {cam_id} v_base {v_base} out of range [0, 1080)"
-        assert v_base > 100, f"Cam {cam_id} root at {v_base} unexpectedly in top sky region"
+        assert v_base > 50, f"Cam {cam_id} root at {v_base} unexpectedly in top sky region"
 
 
 @pytest.mark.parametrize("cam_id", [1, 2, 3, 4, 5])

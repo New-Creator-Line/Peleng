@@ -15,7 +15,7 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd

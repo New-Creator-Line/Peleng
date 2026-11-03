@@ -23,6 +23,8 @@ def test_data_yaml_structure_and_integrity():
     val_dir = root_path / data["val"]
     test_dir = root_path / data.get("test", "test/images")
 
+    if not train_dir.exists():
+        pytest.skip(f"Train dir {train_dir} not found (local dataset is gitignored)")
     assert train_dir.exists(), f"Train dir {train_dir} not found"
     assert val_dir.exists(), f"Val dir {val_dir} not found"
     # test split is optional in v3
@@ -38,6 +40,8 @@ def test_data_yaml_structure_and_integrity():
 
 def test_labels_validity():
     labels_dir = Path("dataset/peleng.v3i.yolov8/train/labels")
+    if not labels_dir.exists():
+        pytest.skip("Labels dir not found (local dataset is gitignored)")
     assert labels_dir.exists()
 
     label_files = list(labels_dir.glob("*.txt"))
