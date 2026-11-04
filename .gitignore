@@ -228,6 +228,8 @@ __marimo__/
 *.bin
 *.torchscript
 weights/
+!weights/cabin/
+!weights/cabin/peleng_cabin_best.pt
 runs/
 
 # Training datasets, raw heavy videos, and archives
