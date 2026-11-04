@@ -265,3 +265,7 @@ build/
 *.rar
 *.zip
 *.7z
+
+# From DEV
+/data/cabin_dataset/
+*.part

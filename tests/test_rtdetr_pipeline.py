@@ -17,7 +17,10 @@ def test_rtdetr_config_defaults():
 
 
 def test_rtdetr_validate_environment_success():
-    cfg = RTDETRConfig(data_yaml="data/datasets/yolo_v3/data.yaml")
+    yaml_path = Path("data/datasets/yolo_v3/data.yaml")
+    if not yaml_path.exists():
+        pytest.skip("Training dataset not present in repository")
+    cfg = RTDETRConfig(data_yaml=str(yaml_path))
     validate_environment(cfg)
 
 

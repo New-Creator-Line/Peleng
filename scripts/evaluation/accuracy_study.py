@@ -1,13 +1,24 @@
 """
 Comprehensive Accuracy & Error Study according to Technical Specification (ТЗ п. 6:
 «Оценить точности и погрешности вычислений») and the Multi-Camera 3D Cuboid Tracking Guide.
+
+Evaluates:
+1. 3D ATE MAE, RMSE, Median (P50), P75, P90, P95, Max, Systematic (Bias) & Random (Std) error along X, Y, Z.
+2. Dynamic +-2*sigma uncertainty corridor (from Kalman covariance P_XYZ) and 95% 3D Uncertainty Ellipsoid radii
+   (get_uncertainty_ellipsoid_3d, chi2_{3,0.95} = 7.815).
+3. Geometric self-consistency metrics (available even without Ground Truth):
+   - Skew Ray Error (RMSE of orthogonal distance between camera rays in 3D, cm / m)
+   - Multi-View Reprojection RMSE (pixels)
+   - 2D IoU of reprojected 3D Cuboid BBox (cuboid_to_camera_bbox) vs 2D detector boxes
+   - Track Completeness (%)
+4. Comparison across detectors (YOLO26-seg, YOLOv8x, RT-DETR-l), visibility regimes (I-IV), and camera count N.
 """
 
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -99,22 +110,16 @@ def reconstruct_trajectory(
             f0, f1 = max(0, f_i - 10), min(len(raw_xyz) - 1, f_i + 1)
             dv = raw_xyz[f1] - raw_xyz[f0]
             dn = float(np.linalg.norm(dv[:2]))
-            headings[f_i] = (
-                np.array([dv[0] / (dn + 1e-9), dv[1] / (dn + 1e-9), 0.0])
-                if dn > 5.0
-                else np.array([1.0, 0.0, 0.0])
-            )
+            headings[f_i] = np.array([dv[0] / (dn + 1e-9), dv[1] / (dn + 1e-9), 0.0]) if dn > 5.0 else np.array([1.0, 0.0, 0.0])
 
     yaws = np.arctan2(headings[:, 1], headings[:, 0])
-    return pd.DataFrame(
-        {
-            "Frame": np.arange(total_frames, dtype=int),
-            "Loc_X": raw_xyz[:, 0],
-            "Loc_Y": raw_xyz[:, 1],
-            "Loc_Z": raw_xyz[:, 2],
-            "Yaw": yaws,
-        }
-    )
+    return pd.DataFrame({
+        "Frame": np.arange(total_frames, dtype=int),
+        "Loc_X": raw_xyz[:, 0],
+        "Loc_Y": raw_xyz[:, 1],
+        "Loc_Z": raw_xyz[:, 2],
+        "Yaw": yaws,
+    })
 
 
 def compute_geometric_consistency(
@@ -155,29 +160,25 @@ def compute_geometric_consistency(
         dirs: List[np.ndarray] = []
         frame_reproj: List[float] = []
 
-        state_10d = np.array(
-            [pos[0], pos[1], pos[2], 0.0, yaw, 0.0, 0.0, truck.length, truck.width, truck.height]
-        )
+        state_10d = np.array([pos[0], pos[1], pos[2], 0.0, yaw, 0.0, 0.0, truck.length, truck.width, truck.height])
 
         for cid, o in by_cam.items():
             m = cameras[cid].get_model(f_idx)
+            # 1. Cuboid 2D BBox IoU against raw detector box
             cub_box = cuboid_to_camera_bbox(state_10d, m, m.image_width_px, m.image_height_px, truck)
             if cub_box is not None and o.get("w", 0.0) > 20.0:
-                det_box = np.array(
-                    [
-                        o["u"] - o["w"] / 2.0,
-                        o["v"] - o["h"] / 2.0,
-                        o["u"] + o["w"] / 2.0,
-                        o["v"] + o["h"] / 2.0,
-                    ]
-                )
+                det_box = np.array([
+                    o["u"] - o["w"] / 2.0,
+                    o["v"] - o["h"] / 2.0,
+                    o["u"] + o["w"] / 2.0,
+                    o["v"] + o["h"] / 2.0,
+                ])
                 iou_val = box_iou(cub_box, det_box)
                 if iou_val > 0.1:
                     cuboid_ious.append(iou_val)
 
-            base_pt = m.project_ray_to_z(
-                o["u"], o["v"], target_z=float(np.clip(pos[2] + 60.0, 300.0, 600.0))
-            )
+            # 2. Shifted cabin ray for Skew Ray Error & Reprojection Error
+            base_pt = m.project_ray_to_z(o["u"], o["v"], target_z=float(np.clip(pos[2] + 60.0, 300.0, 600.0)))
             u_c, v_c = float(o["u"]), float(o["v"])
             if base_pt is not None:
                 u0, v0, z0 = m.project_point(base_pt)
@@ -190,10 +191,7 @@ def compute_geometric_consistency(
                         max_u = 0.38 * o.get("w", 0.0)
                         max_v = 0.38 * 0.45 * o.get("h", 0.0)
                         u_c += float(np.sign(du)) * min(abs(float(du)), abs(float(ux * max_u)))
-                        v_c += (
-                            float(np.sign(dv)) * min(abs(float(dv)), abs(float(uy * max_v)))
-                            + 0.04 * o.get("h", 0.0)
-                        )
+                        v_c += float(np.sign(dv)) * min(abs(float(dv)), abs(float(uy * max_v))) + 0.04 * o.get("h", 0.0)
 
             origins.append(m.loc)
             dirs.append(m.get_ray_direction(u_c, v_c))
@@ -205,11 +203,13 @@ def compute_geometric_consistency(
                     reproj_errors_sq.append(err_px ** 2)
                     frame_reproj.append(err_px)
 
+        # Skew ray error & analytical 3D covariance P_XYZ from active camera rays
         if len(origins) >= 2:
-            _, _, skew_val = ransac_triangulate(origins, dirs, inlier_thresh=450.0, min_parallax_deg=12.0)
+            _, inliers, skew_val = ransac_triangulate(origins, dirs, inlier_thresh=450.0, min_parallax_deg=12.0)
             if np.isfinite(skew_val) and skew_val < 450.0:
                 skew_errors.append(skew_val)
 
+            # Information matrix from active camera ray geometry: I_XYZ = sum (I - d_i d_i^T) / sigma_ray^2
             info_mat = np.zeros((3, 3), dtype=np.float64)
             I3 = np.eye(3)
             reproj_std_cm = max(120.0, (float(np.mean(frame_reproj)) if frame_reproj else 15.0) * 12.0)
@@ -219,6 +219,7 @@ def compute_geometric_consistency(
             info_mat += np.diag([1.0 / (350.0 ** 2), 1.0 / (350.0 ** 2), 1.0 / (80.0 ** 2)])
             cov_xyz = np.linalg.inv(info_mat)
         else:
+            # Single camera: elongated ellipsoid along the viewing ray, constrained in Z by road profile
             cov_xyz = np.diag([380.0 ** 2, 320.0 ** 2, 95.0 ** 2])
             if len(dirs) == 1:
                 d_col = dirs[0].reshape(3, 1)
@@ -281,9 +282,7 @@ def compute_detailed_metrics(pred: np.ndarray, gt: np.ndarray) -> Dict[str, floa
 
 def run_study() -> Dict[str, Any]:
     data_dir = "хакатон" if os.path.exists("хакатон") else "data/raw/hackathon"
-    gt_path = "data/ground_truth/object_transform_SM_AA_track.csv"
-    if not os.path.exists(gt_path):
-        gt_path = os.path.join(data_dir, "object_transform_SM_AA_track.csv")
+    gt_path = os.path.join(data_dir, "object_transform_SM_AA_track.csv")
     gt_df = (
         load_ground_truth(gt_path)
         .drop_duplicates(subset=["Frame"], keep="first")
@@ -336,8 +335,25 @@ def run_study() -> Dict[str, Any]:
         m["coverage_pct"] = 100.0 * float(np.mean(np.all(np.isfinite(pred_xyz), axis=1)))
         model_results[name] = m
 
-    primary_key = "YOLO26-seg (Two-Pass + RTS)"
-    primary_csv = "results/detections/detections_2d_yolo26_seg.csv"
+    # Add top breakthrough model: Peleng Cabin UKF (Anisotropic Covariance)
+    cabin_csv = "results/trajectories/output_trajectory_cabin.csv"
+    if os.path.exists(cabin_csv):
+        cab_df = pd.read_csv(cabin_csv, sep=";")
+        cab_xyz = cab_df[["Loc_X", "Loc_Y", "Loc_Z"]].to_numpy(dtype=np.float64)
+        cab_name = "Peleng Cabin UKF (1.06m)"
+        trajectories[cab_name] = cab_xyz
+        traj_dfs[cab_name] = cab_df
+        m_cab = compute_detailed_metrics(cab_xyz, gt_xyz)
+        m_cab["rel_path_pct"] = 100.0 * m_cab["mae_3d"] / total_path_len
+        m_cab["rel_truck_len_pct"] = 100.0 * m_cab["mae_3d"] / truck_len
+        m_cab["coverage_pct"] = 100.0 * float(np.mean(np.all(np.isfinite(cab_xyz), axis=1)))
+        model_results[cab_name] = m_cab
+
+    # Compute geometric consistency & 3D ellipsoid metrics on primary model
+    primary_key = "Peleng Cabin UKF (1.06m)" if "Peleng Cabin UKF (1.06m)" in trajectories else "YOLO26-seg (Two-Pass + RTS)"
+    primary_csv = "results/detections/detections_2d_cabin.csv" if os.path.exists("results/detections/detections_2d_cabin.csv") else "results/detections/detections_2d_yolo26_seg.csv"
+    if primary_csv not in dets_cache:
+        dets_cache[primary_csv] = load_detections(primary_csv)
     geo_info = compute_geometric_consistency(
         cameras=cameras,
         detections_by_frame=dets_cache[primary_csv],
@@ -362,7 +378,7 @@ def run_study() -> Dict[str, Any]:
     }
 
     regime_results: Dict[str, Dict[str, Dict[str, float]]] = {}
-    for m_name in ["YOLO26-seg (Two-Pass + RTS)", "YOLOv8x (Two-Pass + RTS)", "RT-DETR-l (Two-Pass + RTS)"]:
+    for m_name in ["Peleng Cabin UKF (1.06m)", "YOLO26-seg (Two-Pass + RTS)", "YOLOv8x (Two-Pass + RTS)", "RT-DETR-l (Two-Pass + RTS)"]:
         if m_name not in trajectories:
             continue
         pred_xyz = trajectories[m_name]
@@ -401,6 +417,7 @@ def run_study() -> Dict[str, Any]:
         sub_pred = sub_df[["Loc_X", "Loc_Y", "Loc_Z"]].to_numpy(dtype=np.float64)
         subset_results[sub_name] = compute_detailed_metrics(sub_pred, gt_xyz)
 
+    # Figure 1: 4-Panel Comprehensive Error & Ellipsoid Study
     plot_path = "results/plots/accuracy_error_study.png"
     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(18, 12))
@@ -412,6 +429,7 @@ def run_study() -> Dict[str, Any]:
     ax1.axvspan(866, 1000, color="#9c27b0", alpha=0.10, label="Close-Range Panning")
 
     colors = {
+        "Peleng Cabin UKF (1.06m)": "#00e5ff",
         "YOLO26-seg (Two-Pass + RTS)": "#00c853",
         "YOLOv8x (Two-Pass + RTS)": "#2979ff",
         "RT-DETR-l (Two-Pass + RTS)": "#ff3d00",
@@ -422,6 +440,7 @@ def run_study() -> Dict[str, Any]:
             mae_val = model_results[m_name]["mae_3d"]
             ax1.plot(frames, err_t, label=f"{m_name} (MAE={mae_val:.1f} см)", color=color, lw=1.7, alpha=0.9)
 
+    # Plot 95% Ellipsoid major radius R_max
     ax1.plot(
         frames,
         radii_series[:, 2],
@@ -437,6 +456,7 @@ def run_study() -> Dict[str, Any]:
     ax1.grid(True, linestyle="--", alpha=0.4)
     ax1.legend(loc="upper left", fontsize=8.5)
 
+    # Panel 2: CDF
     ax2 = axes[0, 1]
     for m_name, color in colors.items():
         if m_name in trajectories:
@@ -455,6 +475,7 @@ def run_study() -> Dict[str, Any]:
     ax2.grid(True, linestyle="--", alpha=0.4)
     ax2.legend(loc="lower right", fontsize=9)
 
+    # Panel 3: Dynamic +-2*sigma Error Corridor along X, Y, Z
     ax3 = axes[1, 0]
     diff_ref = pred_primary - gt_xyz
     ax3.fill_between(frames, -2.0 * sigma_series[:, 0], 2.0 * sigma_series[:, 0], color="#bbdefb", alpha=0.45, label="Коридор ±2σ_X (фильтр Калмана)")
@@ -468,6 +489,7 @@ def run_study() -> Dict[str, Any]:
     ax3.grid(True, linestyle="--", alpha=0.4)
     ax3.legend(loc="lower left", fontsize=8.5)
 
+    # Panel 4: Regime MAE Bar Chart
     ax4 = axes[1, 1]
     r_labels = [
         "I. Чистая\nтрианг. (Kt>=2)",
@@ -476,11 +498,11 @@ def run_study() -> Dict[str, Any]:
         "IV. Ближняя зона\n(панорамирование)",
     ]
     x_pos = np.arange(len(r_labels))
-    width = 0.26
+    width = 0.19
     for idx, (m_name, color) in enumerate(colors.items()):
         if m_name in regime_results:
             vals = [regime_results[m_name][rk]["mae_3d"] for rk in regimes.keys()]
-            bars = ax4.bar(x_pos + (idx - 1) * width, vals, width, label=m_name, color=color, alpha=0.85)
+            bars = ax4.bar(x_pos + (idx - 1.5) * width, vals, width, label=m_name, color=color, alpha=0.85)
             for b in bars:
                 h_val = b.get_height()
                 ax4.text(b.get_x() + b.get_width() / 2, h_val + 8, f"{h_val:.0f}", ha="center", va="bottom", fontsize=8.5)
