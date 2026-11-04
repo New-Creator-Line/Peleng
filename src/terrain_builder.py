@@ -148,50 +148,78 @@ def _extract_video_frame_rgb(
     fps: float = 30.0,
 ) -> np.ndarray:
     """
-    Extracts a single RGB frame (H, W, 3) uint8 from an MP4 file using cv2 or ffmpeg.
-    Falls back to procedural outdoor frame if video file or decoder is unavailable.
+    Extracts an authentic RGB background image for the camera.
+    Prioritizes verified clean background frames from calibration/stereo suites,
+    then actual MP4 video files, falling back to procedural frame only if nothing exists.
     """
-    if os.path.exists(video_path):
-        try:
-            import cv2  # type: ignore
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    workspace_root = os.path.dirname(repo_root)
 
-            cap = cv2.VideoCapture(video_path)
-            if cap.isOpened():
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ok, frame_bgr = cap.read()
-                cap.release()
-                if ok and frame_bgr is not None:
-                    return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        except Exception:
-            pass
-
-        ffmpeg_bin = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
-        if os.path.exists(ffmpeg_bin):
+    # 1. Look for clean background images from calibration or stereo folders
+    clean_candidates = [
+        os.path.join(repo_root, "results", "calibration", "clean_frames", f"cam{cam_id}_frame0.jpg"),
+        os.path.join(workspace_root, "all_camera_stereo", f"camera_{cam_id}_clean_bg.jpg"),
+        os.path.join(workspace_root, "three_camera_stereo", f"camera_{cam_id}_clean_bg.jpg"),
+        os.path.join(workspace_root, "two_camera_stereo", f"camera_{cam_id}_clean_bg.jpg"),
+        os.path.join(workspace_root, "project2", "clean_background_frames", f"cam{cam_id}.jpg"),
+    ]
+    for img_path in clean_candidates:
+        if os.path.exists(img_path):
             try:
-                timestamp_sec = max(0.0, frame_idx / max(1.0, fps))
-                cmd = [
-                    ffmpeg_bin,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-ss",
-                    f"{timestamp_sec:.3f}",
-                    "-i",
-                    video_path,
-                    "-frames:v",
-                    "1",
-                    "-f",
-                    "image2pipe",
-                    "-vcodec",
-                    "png",
-                    "-",
-                ]
-                proc = subprocess.run(cmd, capture_output=True, timeout=8.0, check=False)
-                if proc.returncode == 0 and len(proc.stdout) > 100:
-                    pil_img = Image.open(io.BytesIO(proc.stdout)).convert("RGB")
-                    return np.asarray(pil_img, dtype=np.uint8)
+                pil_img = Image.open(img_path).convert("RGB")
+                return np.asarray(pil_img, dtype=np.uint8)
             except Exception:
                 pass
+
+    # 2. Look for authentic MP4 videos
+    video_candidates = [
+        video_path,
+        os.path.join(workspace_root, "хакатон", f"Way1.FinalImage.CineCameraActor{cam_id}.mp4"),
+        os.path.join(repo_root, "хакатон", f"Way1.FinalImage.CineCameraActor{cam_id}.mp4"),
+        os.path.join(repo_root, "data", "raw", "hackathon", f"Way1.FinalImage.CineCameraActor{cam_id}.mp4"),
+    ]
+    for v_path in video_candidates:
+        if os.path.exists(v_path):
+            try:
+                import cv2  # type: ignore
+
+                cap = cv2.VideoCapture(v_path)
+                if cap.isOpened():
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ok, frame_bgr = cap.read()
+                    cap.release()
+                    if ok and frame_bgr is not None:
+                        return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            except Exception:
+                pass
+
+            ffmpeg_bin = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+            if os.path.exists(ffmpeg_bin):
+                try:
+                    timestamp_sec = max(0.0, frame_idx / max(1.0, fps))
+                    cmd = [
+                        ffmpeg_bin,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-ss",
+                        f"{timestamp_sec:.3f}",
+                        "-i",
+                        v_path,
+                        "-frames:v",
+                        "1",
+                        "-f",
+                        "image2pipe",
+                        "-vcodec",
+                        "png",
+                        "-",
+                    ]
+                    proc = subprocess.run(cmd, capture_output=True, timeout=8.0, check=False)
+                    if proc.returncode == 0 and len(proc.stdout) > 100:
+                        pil_img = Image.open(io.BytesIO(proc.stdout)).convert("RGB")
+                        return np.asarray(pil_img, dtype=np.uint8)
+                except Exception:
+                    pass
 
     return _generate_procedural_frame(cam_id=cam_id)
 
