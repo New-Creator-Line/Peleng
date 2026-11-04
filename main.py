@@ -84,12 +84,13 @@ def _resolve_input_path(preferred: str, fallback: str) -> str:
 
 def _unclip_stationary_occluder_edges(
     grouped_detections: Dict[int, List[Dict[str, float]]],
+    cameras: Dict[int, CameraTimeline],
     panning_cams: Set[int],
 ) -> Dict[int, List[Dict[str, float]]]:
     """
-    Restores the unclipped 2D center and width when one vertical edge (x1 or x2) of a lateral
-    camera bounding box is pinned against a stationary obstacle (tree trunk or FOV right border)
-    while the opposite physical edge of the truck continues to move.
+    Universally restores unclipped 2D center and width when either vertical edge (x1 or x2)
+    is pinned against an obstacle (tree, pole, building) or an image boundary (left or right border)
+    regardless of vehicle movement direction or image resolution.
     """
     cam_hist: Dict[int, List[Tuple[int, float, float, float, float]]] = {}
     out: Dict[int, List[Dict[str, float]]] = {}
@@ -99,7 +100,9 @@ def _unclip_stationary_occluder_edges(
             o = dict(raw_o)
             cid = int(o["cam_id"])
             u, v, w, h = float(o["u"]), float(o["v"]), float(o.get("w", 0.0)), float(o.get("h", 0.0))
-            if (cid not in panning_cams) and h > 40.0 and w > 0.0:
+            if (cid not in panning_cams) and h > 40.0 and w > 0.0 and cid in cameras:
+                cam_m = cameras[cid].get_model(f)
+                img_w = float(cam_m.image_width_px)
                 x1, x2 = u - w / 2.0, u + w / 2.0
                 hist = cam_hist.setdefault(cid, [])
                 prev = next((item for item in reversed(hist) if 6 <= f - item[0] <= 15), None)
@@ -108,23 +111,28 @@ def _unclip_stationary_occluder_edges(
                 if len(hist) > 35:
                     hist.pop(0)
 
-                if prev is not None and (w < 2.55 * h) and max_recent_ar > 2.15:
+                if prev is not None and max_recent_ar > 2.0 and (w < 0.90 * max_recent_ar * h):
                     _, px1, px2, pw, ph = prev
                     dx1 = abs(x1 - px1)
-                    # Case A: right edge x2 is pinned at right FOV border while left edge x1 moves
-                    if x2 >= 1905.0 and w < 2.6 * h:
-                        if w < 1.1 * h:
-                            continue
-                        w_full = 2.88 * h
+                    dx2 = abs(x2 - px2)
+                    w_full = max_recent_ar * h
+
+                    # Case A: Border occlusion (either left or right image boundary)
+                    if x2 >= img_w - 15.0 and dx1 > 8.0:
                         o["u"] = x1 + 0.5 * w_full
                         o["w"] = w_full
                         o["was_unclipped"] = 1.0
-                    # Case B: left edge x1 is pinned against a tree trunk in mid-frame while right edge x2 moves left
-                    elif dx1 < 8.0 and (x2 - px2 < -14.0) and (200.0 < x1 < 1700.0):
-                        if w < 1.05 * h:
-                            continue
-                        w_full = 2.72 * h
+                    elif x1 <= 15.0 and dx2 > 8.0:
                         o["u"] = x2 - 0.5 * w_full
+                        o["w"] = w_full
+                        o["was_unclipped"] = 1.0
+                    # Case B: Obstacle occlusion (tree, pole, building) - either left or right edge is pinned
+                    elif dx1 < 8.0 and dx2 > 12.0:
+                        o["u"] = x2 - 0.5 * w_full
+                        o["w"] = w_full
+                        o["was_unclipped"] = 1.0
+                    elif dx2 < 8.0 and dx1 > 12.0:
+                        o["u"] = x1 + 0.5 * w_full
                         o["w"] = w_full
                         o["was_unclipped"] = 1.0
             new_list.append(o)
@@ -181,9 +189,8 @@ def _reconstruct_pass(
         if ref_headings is not None:
             fwd_3d: Optional[np.ndarray] = ref_headings[frame_idx]
         else:
-            vel = tracker.get_velocity() if tracker.is_initialized else np.array([1.0, -0.35, 0.0])
-            speed_xy = float(np.linalg.norm(vel[:2]))
-            if not tracker.is_initialized or speed_xy > 50.0:
+            vel = tracker.get_velocity() if tracker.is_initialized else None
+            if vel is not None and float(np.linalg.norm(vel[:2])) > 50.0:
                 fwd_3d = np.array([vel[0], vel[1], 0.0], dtype=np.float64)
                 fwd_3d /= np.linalg.norm(fwd_3d) + 1e-9
             else:
@@ -197,7 +204,7 @@ def _reconstruct_pass(
             )
             for o in valid_obs:
                 m = cameras[o["cam_id"]].get_model(frame_idx)
-                target_z = float(np.clip(ref_3d[2], 300.0, 600.0)) if ref_3d is not None else 450.0
+                target_z = float(ref_3d[2]) if ref_3d is not None else 0.0
                 base_pt = m.project_ray_to_z(o["u"], o["v"], target_z=target_z)
                 if base_pt is None:
                     base_pt = ref_3d
@@ -304,7 +311,7 @@ def _reconstruct_pass(
             # Single-camera ray tracking when occluded on other cameras
             tracker.x[5] *= 0.7
             pred_pt = tracker.predict()
-            target_z = float(0.75 * np.clip(pred_pt[2] - cabin_z_shift, 300.0, 520.0) + 0.25 * 365.0)
+            target_z = float(pred_pt[2] - cabin_z_shift)
             best_single_pt = None
             best_dist = float("inf")
             best_single_occ = False
@@ -334,7 +341,7 @@ def _reconstruct_pass(
             elif valid_obs:
                 best_single = max(valid_obs, key=lambda x: x["conf"])
                 cam_model = cameras[best_single["cam_id"]].get_model(frame_idx)
-                est_single = cam_model.project_ray_to_z(best_single["u"], best_single["v"], target_z=450.0)
+                est_single = cam_model.project_ray_to_z(best_single["u"], best_single["v"], target_z=0.0)
                 if est_single is not None:
                     est_single[2] += cabin_z_shift
                     tracker.initialize(est_single)
@@ -372,6 +379,7 @@ def run_pipeline(
     conf_threshold: float = 0.3,
     dt: float = 1.0 / 30.0,
     realtime_only: bool = False,
+    road_spline_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Executes the full 3D reconstruction and tracking pipeline.
@@ -425,7 +433,7 @@ def run_pipeline(
     ]
     is_yolo_bbox = (not is_mock_mode) and (float(np.mean(sample_widths)) > 100.0 if sample_widths else False)
     if is_yolo_bbox:
-        grouped_detections = _unclip_stationary_occluder_edges(grouped_detections, panning_cams)
+        grouped_detections = _unclip_stationary_occluder_edges(grouped_detections, cameras, panning_cams)
 
     # 3. Run Multi-View 3D Triangulation & Cabin Pivot Alignment
     print("[3/5] Running Multi-view 3D Triangulation & Kalman Filtering...")
@@ -565,10 +573,14 @@ def main():
 
     parser = argparse.ArgumentParser(description="Peleng 3D Real-Time Tracking Core")
     parser.add_argument("--calib-dir", default=default_calib, help="Directory with camera calibration CSV files")
+    default_detections = _resolve_input_path(
+        "results/detections/detections_2d_yolo26_seg.csv",
+        "results/detections/detections_2d_yolo_real.csv",
+    )
     parser.add_argument(
         "--detections",
-        default="results/detections/detections_2d_yolo_real.csv",
-        help="Path to 2D detections CSV",
+        default=default_detections,
+        help="Path to 2D detections CSV (defaults to YOLO26-seg if available)",
     )
     parser.add_argument("--gt", default=default_gt, help="Path to Ground Truth CSV (optional)")
     parser.add_argument(
@@ -590,6 +602,7 @@ def main():
     parser.add_argument("--no-plot", action="store_false", dest="plot", help="Disable plotting")
     parser.add_argument("--conf-threshold", type=float, default=0.3, help="Confidence threshold for 2D detections")
     parser.add_argument("--realtime", action="store_true", default=False, help="Run strictly causal single-pass mode")
+    parser.add_argument("--road-spline", type=str, default=None, help="Optional external road spline anchors JSON (disabled by default for general scenes)")
 
     args = parser.parse_args()
 
@@ -605,6 +618,7 @@ def main():
         plot=args.plot,
         conf_threshold=args.conf_threshold,
         realtime_only=args.realtime,
+        road_spline_path=args.road_spline,
     )
 
 
