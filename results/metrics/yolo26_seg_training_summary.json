@@ -1,0 +1,27 @@
+{
+  "config": {
+    "data_yaml": "data/datasets/My First Project.v1i.yolo26/data.yaml",
+    "model_name": "weights/finetuned/peleng_yolo26x_seg_roboflow_best.pt",
+    "epochs": 15,
+    "batch_size": 2,
+    "imgsz": 1024,
+    "device": "0",
+    "workers": 2,
+    "patience": 0,
+    "seed": 42,
+    "lr0": 0.0001,
+    "close_mosaic": 10,
+    "erasing": 0.4,
+    "mosaic": 1.0,
+    "mixup": 0.1,
+    "cache": "ram",
+    "nbs": 64,
+    "freeze": 10,
+    "project": "runs/segment",
+    "name": "peleng_yolo26x_seg_roboflow_plus15",
+    "save_weights_dir": "weights/finetuned",
+    "best_weight_name": "peleng_yolo26x_seg_roboflow_plus15_best.pt"
+  },
+  "save_dir": "C:\\projects\\Peleng\\runs\\segment\\runs\\segment\\peleng_yolo26x_seg_roboflow_plus15",
+  "exported_weight": "weights\\finetuned\\peleng_yolo26x_seg_roboflow_plus15_best.pt"
+}

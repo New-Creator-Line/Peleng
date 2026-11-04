@@ -18,19 +18,18 @@ Workflow and operational runbook for fine-tuning and running YOLO object detecti
 ## 1. Dataset Configuration (`data.yaml`)
 Dataset structure follows standard Ultralytics format:
 ```yaml
-path: C:/projects/Peleng/peleng.v1i.yolov8
+path: C:/projects/Peleng/data/datasets/yolo_v3
 train: train/images
 val: valid/images
-test: test/images
 nc: 1
 names: ['truck']
 ```
-*Note:* Always keep `path` absolute to avoid working-directory resolution issues on Windows.
+*Note:* Always keep `path` absolute or relative to project root to avoid working-directory resolution issues on Windows.
 
 ## 2. Model Training & Fine-Tuning
 Execute fine-tuning with early stopping, AMP, and weight preservation:
 ```bash
-python train_yolo.py --model yolov8x.pt --epochs 30 --batch 8 --imgsz 512 --device 0
+python scripts/training/train_yolo.py --model weights/pretrained/yolov8x.pt --epochs 30 --batch 8 --imgsz 512 --device 0
 ```
 
 ### Key Hyperparameters:
@@ -40,19 +39,19 @@ python train_yolo.py --model yolov8x.pt --epochs 30 --batch 8 --imgsz 512 --devi
 - `seed=42`: Explicit seed for NumPy, PyTorch, and Python random.
 
 Outputs:
-- Best weights: `weights/peleng_yolov8x_best.pt`
-- Training metrics JSON: `results/yolo_metrics_summary.json`
+- Best weights: `weights/finetuned/peleng_yolov8x_best.pt`
+- Training metrics JSON: `results/metrics/metrics_summary_yolo.json`
 
 ## 3. Video Processing & Multi-View Dashboard Generation
 Generate individual annotated camera videos, the synchronized 6-panel multi-camera grid dashboard, and the 2D detections CSV in one pass:
 ```bash
-python process_videos_yolo.py --weights weights/peleng_yolov8x_best.pt --videos_dir хакатон --output_dir results/videos --conf 0.25 --device 0
+python scripts/inference/process_videos_yolo.py --weights weights/finetuned/peleng_yolov8x_best.pt --videos_dir data/raw/hackathon --output_dir results/videos --conf 0.25 --device 0
 ```
 
 Outputs:
 - `results/videos/camera_{1..5}_detected.mp4`: Individual Full-HD streams with bounding boxes and HUD.
 - `results/videos/multiview_dashboard_yolo.mp4`: Synchronized 3x2 grid with real-time telemetry card.
-- `results/detections_2d_yolo_real.csv`: Format `Frame;Cam_ID;u;v;w;h;conf`.
+- `results/detections/detections_2d_yolo_real.csv`: Format `Frame;Cam_ID;u;v;w;h;conf`.
 
 ## 4. Programmatic Inference via `src.yolo_detector`
 ```python

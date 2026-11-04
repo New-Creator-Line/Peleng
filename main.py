@@ -53,8 +53,17 @@ def is_box_occluded(
     return False
 
 
+def _resolve_input_path(preferred: str, fallback: str) -> str:
+    """Returns preferred path if it exists, otherwise falls back to alternative."""
+    if os.path.exists(preferred):
+        return preferred
+    if os.path.exists(fallback):
+        return fallback
+    return preferred
+
+
 def run_pipeline(
-    calib_dir: str,
+    calib_dir: str = "data/raw/hackathon",
     detections_csv: Optional[str] = None,
     gt_csv: Optional[str] = None,
     output_csv: str = "results/trajectories/output_trajectory_yolo.csv",
@@ -70,6 +79,10 @@ def run_pipeline(
     Blind Test Mode (when gt_csv is None).
     """
     start_time = time.perf_counter()
+    calib_dir = _resolve_input_path(calib_dir, "хакатон" if "hackathon" in calib_dir else "data/raw/hackathon")
+    if gt_csv:
+        gt_csv = _resolve_input_path(gt_csv, "хакатон/object_transform_SM_AA_track.csv" if "ground_truth" in gt_csv or "hackathon" in gt_csv else "data/raw/hackathon/object_transform_SM_AA_track.csv")
+
     print("=" * 60)
     print("  PELENG 3D VISION & TRACKING ENGINE (C++ / Python)")
     print("=" * 60)
@@ -363,14 +376,20 @@ def run_pipeline(
 
 
 def main():
+    default_calib = _resolve_input_path("data/raw/hackathon", "хакатон")
+    default_gt = _resolve_input_path(
+        "data/ground_truth/object_transform_SM_AA_track.csv",
+        _resolve_input_path("data/raw/hackathon/object_transform_SM_AA_track.csv", "хакатон/object_transform_SM_AA_track.csv")
+    )
+
     parser = argparse.ArgumentParser(description="Peleng 3D Real-Time Tracking Core")
-    parser.add_argument("--calib-dir", default="хакатон", help="Directory with camera calibration CSV files")
+    parser.add_argument("--calib-dir", default=default_calib, help="Directory with camera calibration CSV files")
     parser.add_argument(
         "--detections",
         default="results/detections/detections_2d_yolo_real.csv",
         help="Path to 2D detections CSV",
     )
-    parser.add_argument("--gt", default="хакатон/object_transform_SM_AA_track.csv", help="Path to Ground Truth CSV (optional)")
+    parser.add_argument("--gt", default=default_gt, help="Path to Ground Truth CSV (optional)")
     parser.add_argument(
         "--output",
         default="results/trajectories/output_trajectory_yolo.csv",

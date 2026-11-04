@@ -226,15 +226,21 @@ __marimo__/
 *.onnx
 *.engine
 *.bin
-weights/
+weights/pretrained/
+weights/finetuned/
+weights/*.pt
 runs/
 
-# Training datasets, zip archives and debug images
+# Training datasets, raw heavy videos, and archives
+data/raw/**/*.mp4
+data/datasets/
+data/archives/
 dataset/
 dataset*/
 peleng.v1i.yolov8/
 *.zip
 debug_*.jpg
+ТЗ хакатон.pdf
 
 # Large video outputs
 results/videos/
@@ -242,3 +248,4 @@ results/videos/
 # Compiled C++ Python extensions and build artifacts
 *.pyd
 build/
+*.egg-info/

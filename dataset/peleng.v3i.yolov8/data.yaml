@@ -1,6 +1,0 @@
-path: dataset/peleng.v3i.yolov8
-train: train/images
-val: valid/images
-
-nc: 1
-names: ['truck']
