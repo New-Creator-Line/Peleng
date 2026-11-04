@@ -230,6 +230,8 @@ __marimo__/
 weights/
 !weights/cabin/
 !weights/cabin/peleng_cabin_best.pt
+!weights/finetuned/
+!weights/finetuned/peleng_yolov8x_best.pt
 runs/
 
 # Training datasets, raw heavy videos, and archives
@@ -252,5 +254,5 @@ results/videos/
 *.pyd
 build/
 *.egg-info/
-
-*.part
+
+*.part

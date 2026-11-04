@@ -15,8 +15,10 @@ def test_training_config_defaults():
 
 
 def test_validate_environment_success():
-    cfg = TrainingConfig(data_yaml="data/datasets/yolo_v3/data.yaml")
-    # Should not raise
+    yaml_path = Path("data/datasets/yolo_v3/data.yaml")
+    if not yaml_path.exists():
+        pytest.skip("Training dataset not present in repository")
+    cfg = TrainingConfig(data_yaml=str(yaml_path))
     validate_environment(cfg)
 
 

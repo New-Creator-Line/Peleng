@@ -8,7 +8,17 @@
 
 ## 🚀 Быстрый старт
 
-### 1. Запуск полного пайплайна (3D реконструкция + трекинг + метрики)
+### 0. Установка зависимостей
+```bash
+pip install -r requirements.txt
+```
+
+### 1. Запуск лучшего пайплайна (Кабина + Анизотропная ковариация луча, MAE 1.06 м)
+```bash
+python main.py --detections results/detections/detections_2d_cabin.csv --output results/trajectories/output_trajectory_cabin.csv
+```
+
+### 2. Запуск базового пайплайна (YOLOv8x / Full-body):
 ```bash
 python main.py
 ```
@@ -18,12 +28,22 @@ python main.py
 > - 2D детекции: `results/detections/detections_2d_yolo_real.csv`
 > *(Для полной обратной совместимости аргументы `--calib-dir хакатон` и путь к старому расположению также полностью поддерживаются).*
 
-### 2. Запуск в режиме слепого тестирования (Blind Test)
+### 3. Генерация видео-дашборда и потоков камер:
+```bash
+python scripts/inference/process_videos_yolo.py --detections-csv results/detections/detections_2d_hybrid.csv --trajectory-csv results/trajectories/output_trajectory_cabin.csv
+```
+
+### 4. Исследование точности и погрешностей (ТЗ п. 6):
+```bash
+python scripts/evaluation/accuracy_study.py
+```
+
+### 5. Запуск в режиме слепого тестирования (Blind Test)
 ```bash
 python main.py --calib-dir test_dataset --detections results/detections_test.csv --gt none --output results/trajectories/output_blind.csv
 ```
 
-### 3. Запуск набора автотестов
+### 6. Запуск набора автотестов
 ```bash
 python -m pytest tests/ -v
 ```
