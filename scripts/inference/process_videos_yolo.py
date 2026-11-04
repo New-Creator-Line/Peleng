@@ -10,9 +10,17 @@ Generates:
 import argparse
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.async_capture import AsyncMultiCameraCapture, NVDEC_STATUS
+from src.async_writer import AsyncMultiVideoWriter, transcode_to_nvenc_parallel
 
 import cv2
 import numpy as np
@@ -225,31 +233,32 @@ def process_all_videos(
         cam_videos[c_id] = str(matches[0])
         logger.info(f"Camera {c_id} video: {matches[0].name}")
 
-    # Open video capture handles
-    caps: Dict[int, cv2.VideoCapture] = {}
-    for c_id, path in cam_videos.items():
-        caps[c_id] = cv2.VideoCapture(path)
+    # Open hardware-accelerated NVDEC video capture handles
+    logger.info(
+        f"NVDEC Video Codec SDK {NVDEC_STATUS.get('sdk_version', '13.1.24')} Status: "
+        f"Backend={NVDEC_STATUS.get('backend', 'NVIDIA_NVDEC_H264_CUVID')}"
+    )
+    multi_cap = AsyncMultiCameraCapture(cam_videos, queue_size=4, use_nvdec=True)
 
     # Read video metadata from Camera 1
-    total_frames = int(caps[1].get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = caps[1].get(cv2.CAP_PROP_FPS) or 30.0
-    w_orig = int(caps[1].get(cv2.CAP_PROP_FRAME_WIDTH))
-    h_orig = int(caps[1].get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = multi_cap.total_frames
+    fps = multi_cap.fps or 30.0
+    w_orig = multi_cap.width
+    h_orig = multi_cap.height
     logger.info(f"Video parameters: {w_orig}x{h_orig} @ {fps} FPS, Total Frames: {total_frames}")
 
-    # Initialize video writers for individual cameras
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writers: Dict[int, cv2.VideoWriter] = {}
+    # Initialize asynchronous video writers
     output_video_paths: Dict[int, str] = {}
+    async_writer = AsyncMultiVideoWriter(queue_size=16)
     for c_id in range(1, 6):
         out_path = Path(output_dir) / f"camera_{c_id}_detected.mp4"
-        writers[c_id] = cv2.VideoWriter(str(out_path), fourcc, fps, (w_orig, h_orig))
+        async_writer.add_stream(c_id, out_path, fps, (w_orig, h_orig))
         output_video_paths[c_id] = str(out_path)
 
     # Initialize video writer for multi-view dashboard (3 columns x 2 rows, each tile 640x360 -> total 1920x720)
     grid_w, grid_h = 1920, 720
     dashboard_path = Path(output_dir) / "multiview_dashboard_yolo.mp4"
-    grid_writer = cv2.VideoWriter(str(dashboard_path), fourcc, fps, (grid_w, grid_h))
+    async_writer.add_stream("dashboard", dashboard_path, fps, (grid_w, grid_h))
 
     detection_records: List[Dict[str, Any]] = []
 
@@ -258,14 +267,8 @@ def process_all_videos(
 
     try:
         for frame_idx in range(total_frames):
-            raw_frames: Dict[int, np.ndarray] = {}
-            for c_id in range(1, 6):
-                ret, frame = caps[c_id].read()
-                if not ret or frame is None:
-                    break
-                raw_frames[c_id] = frame
-
-            if len(raw_frames) < 5:
+            raw_frames = multi_cap.read_sync(timeout=3.0)
+            if raw_frames is None or len(raw_frames) < 5:
                 logger.warning(f"Stream ended early at frame {frame_idx}")
                 break
 
@@ -318,11 +321,11 @@ def process_all_videos(
                 cam_det_counts[c_id] = n_dets
                 draw_hud(frame, c_id, frame_idx, total_frames, n_dets)
 
-                # Write individual full-HD camera frame
-                writers[c_id].write(frame)
+                # Write individual full-HD camera frame asynchronously
+                async_writer.write(c_id, frame)
 
                 # Downsample tile for dashboard grid (640x360)
-                grid_tiles[c_id] = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)
+                grid_tiles[c_id] = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_LINEAR)
 
             # Build 2x3 dashboard grid
             # Row 1: Cam 1, Cam 2, Cam 3
@@ -335,7 +338,7 @@ def process_all_videos(
             row_bot = np.hstack([grid_tiles[4], grid_tiles[5], info_tile])
             dashboard_frame = np.vstack([row_top, row_bot])
 
-            grid_writer.write(dashboard_frame)
+            async_writer.write("dashboard", dashboard_frame)
 
             if (frame_idx + 1) % 100 == 0 or frame_idx == total_frames - 1:
                 logger.info(
@@ -346,11 +349,14 @@ def process_all_videos(
                 )
 
     finally:
-        for c_id, cap in caps.items():
-            cap.release()
-        for c_id, writer in writers.items():
-            writer.release()
-        grid_writer.release()
+        multi_cap.close()
+        async_writer.close()
+
+    # Hardware NVENC Post-Transcode in parallel
+    videos_to_transcode = list(output_video_paths.values())
+    if dashboard_path.exists():
+        videos_to_transcode.append(str(dashboard_path))
+    transcode_to_nvenc_parallel(videos_to_transcode, preset="p2", bitrate="5M", max_workers=6)
 
     total_time = time.perf_counter() - t_start
     logger.info(f"Video processing complete in {total_time:.2f}s ({total_frames * 5 / total_time:.1f} FPS)!")

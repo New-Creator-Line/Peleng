@@ -10,6 +10,7 @@
 
 #include "camera_model.hpp"
 #include "kalman_filter.hpp"
+#include "nvdec_probe.hpp"
 #include "triangulator.hpp"
 
 namespace py = pybind11;
@@ -74,9 +75,25 @@ py::tuple py_triangulate(const py::list& proj_matrices, const py::list& points_2
 }
 
 PYBIND11_MODULE(peleng_core, m) {
-    m.doc() = "Peleng 3D Vision Core C++ Module (SVD Triangulation & Kalman Filtering)";
+    m.doc() = "Peleng 3D Vision Core C++ Module (SVD Triangulation, Kalman Filtering & NVIDIA Video Codec SDK NVDEC)";
 
     m.def("triangulate", &py_triangulate, "Multi-view 3D Triangulation using SVD DLT");
+
+    m.def("query_nvdec_capabilities", []() {
+        const auto caps = query_nvdec_capabilities();
+        py::dict d;
+        d["sdk_linked"] = caps.sdk_linked;
+        d["sdk_version"] = caps.sdk_version;
+        d["h264_supported"] = caps.h264_supported;
+        d["hevc_supported"] = caps.hevc_supported;
+        d["num_nvdec_engines"] = caps.num_nvdec_engines;
+        d["max_width"] = caps.max_width;
+        d["max_height"] = caps.max_height;
+        d["min_width"] = caps.min_width;
+        d["min_height"] = caps.min_height;
+        d["output_format_mask"] = caps.output_format_mask;
+        return d;
+    }, "Query NVIDIA Video Codec SDK 13.1.24 NVDEC hardware decoder capabilities on the active GPU");
 
     py::class_<KalmanFilter3DCpp>(m, "KalmanTracker3D")
         .def(py::init<double, double, double>(),

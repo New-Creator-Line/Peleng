@@ -227,11 +227,14 @@ __marimo__/
 *.bin
 *.onnx
 weights/pretrained/
+weights/finetuned/*.engine
+weights/finetuned/*.onnx
 runs/**/weights/
 
 # Allow fine-tuned model weights (tracked via Git LFS)
 !weights/finetuned/
-!weights/finetuned/**
+!weights/finetuned/*.pt
+!weights/finetuned/*.torchscript
 
 # Allow training plots, PR/F1 curves, and metrics from runs
 !runs/**/

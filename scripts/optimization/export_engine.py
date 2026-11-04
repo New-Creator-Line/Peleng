@@ -58,24 +58,49 @@ def find_trtexec() -> Optional[Path]:
     return None
 
 
+def _trtexec_supports_fp16_flag(trtexec_bin: Path) -> bool:
+    """Returns True if this trtexec still accepts the legacy ``--fp16`` flag."""
+    try:
+        proc = subprocess.run(
+            [str(trtexec_bin), "--help"], capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("Could not query trtexec --help: %s", e)
+        return False
+    return "--fp16" in (proc.stdout + proc.stderr)
+
+
 def export_to_onnx(
     model_path: str,
     imgsz: int = 1024,
     dynamic: bool = True,
     simplify: bool = True,
+    half: bool = False,
 ) -> Path:
-    """Exports PyTorch model to optimized ONNX format."""
+    """Exports PyTorch model to optimized ONNX format.
+
+    With TensorRT 11+ networks are strongly typed, so engine precision is
+    taken from the ONNX tensor types: ``half=True`` is required for FP16.
+    """
     logger.info("Loading PyTorch model: %s", model_path)
     model = YOLO(model_path)
 
-    logger.info("Exporting to ONNX (imgsz=%d, dynamic=%s, simplify=%s)...", imgsz, dynamic, simplify)
-    t0 = time.perf_counter()
-    onnx_file = model.export(
-        format="onnx",
-        imgsz=imgsz,
-        dynamic=dynamic,
-        simplify=simplify,
+    logger.info(
+        "Exporting to ONNX (imgsz=%d, dynamic=%s, simplify=%s, half=%s)...",
+        imgsz, dynamic, simplify, half,
     )
+    t0 = time.perf_counter()
+    export_kwargs = {
+        "format": "onnx",
+        "imgsz": imgsz,
+        "dynamic": dynamic,
+        "simplify": simplify,
+        "half": half,
+    }
+    if half:
+        # FP16 export requires a CUDA device
+        export_kwargs["device"] = 0
+    onnx_file = model.export(**export_kwargs)
     t_export = time.perf_counter() - t0
     logger.info("ONNX export succeeded in %.1f s -> %s", t_export, onnx_file)
     return Path(onnx_file)
@@ -123,7 +148,9 @@ def build_tensorrt_engine(
         f"--optShapes=images:{batch_size}x3x{imgsz}x{imgsz}",
         f"--maxShapes=images:{batch_size}x3x{imgsz}x{imgsz}",
     ]
-    if fp16:
+    if fp16 and _trtexec_supports_fp16_flag(trtexec_bin):
+        # Legacy TensorRT (<11). TensorRT 11+ removed the flag; precision
+        # then comes from the (FP16) ONNX produced by export_to_onnx(half=True).
         cmd.append("--fp16")
 
     logger.info("Executing trtexec build: %s", " ".join(cmd))
@@ -153,7 +180,7 @@ def main():
         sys.exit(1)
 
     # 1. Export ONNX
-    onnx_path = export_to_onnx(str(input_weights), imgsz=args.imgsz, dynamic=True, simplify=True)
+    onnx_path = export_to_onnx(str(input_weights), imgsz=args.imgsz, dynamic=True, simplify=True, half=args.fp16)
 
     # 2. Build TensorRT .engine
     engine_path = Path(args.output_engine)

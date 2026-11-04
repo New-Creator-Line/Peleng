@@ -33,11 +33,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.async_capture import AsyncMultiCameraCapture, NVDEC_STATUS
+from src.async_writer import AsyncMultiVideoWriter, transcode_to_nvenc_parallel
+
 import cv2
 import numpy as np
 import pandas as pd
+import subprocess
 import torch
 from ultralytics import YOLO
+
+try:
+    import imageio_ffmpeg
+    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception:
+    FFMPEG_EXE = None
 
 from src.detector import compute_mask_moments, suppress_nested_detections, DetectionResult
 
@@ -77,12 +87,19 @@ def draw_styled_segmentation(
         mask_color = (0, 220, 100)    # Emerald green
         contour_color = (50, 255, 150)
 
-    # 1. Alpha-blended mask
+    # 1. Alpha-blended mask (bounded ROI to eliminate 6MB full-frame copy & blend)
     if len(polygon) >= 3:
         pts = np.asarray(polygon, dtype=np.int32).reshape((-1, 1, 2))
-        overlay = frame.copy()
-        cv2.fillPoly(overlay, [pts], mask_color)
-        cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0, frame)
+        px1 = max(0, min(int(np.min(pts[:, 0, 0])), x1))
+        py1 = max(0, min(int(np.min(pts[:, 0, 1])), y1))
+        px2 = min(w_img, max(int(np.max(pts[:, 0, 0])) + 1, x2 + 1))
+        py2 = min(h_img, max(int(np.max(pts[:, 0, 1])) + 1, y2 + 1))
+        if px2 > px1 and py2 > py1:
+            roi = frame[py1:py2, px1:px2]
+            roi_overlay = roi.copy()
+            pts_roi = pts - np.array([[[px1, py1]]], dtype=np.int32)
+            cv2.fillPoly(roi_overlay, [pts_roi], mask_color)
+            cv2.addWeighted(roi_overlay, alpha, roi, 1.0 - alpha, 0, roi)
         cv2.polylines(frame, [pts], isClosed=True, color=contour_color, thickness=2, lineType=cv2.LINE_AA)
 
     # 2. Bounding box with corner accents
@@ -196,7 +213,7 @@ def draw_telemetry_tile(
 
 
 def process_videos_yolo26_seg(
-    weights_path: str = "weights/finetuned/peleng_yolo26x_seg_roboflow_best.pt",
+    weights_path: str = "weights/finetuned/peleng_yolo26x_seg_clean_polish_best_fp16.engine",
     videos_dir: str = "data/raw/hackathon",
     output_dir: str = "results/videos",
     csv_output: str = "results/detections/detections_2d_yolo26_seg.csv",
@@ -215,11 +232,18 @@ def process_videos_yolo26_seg(
     # 1. Resolve weights path
     wt_path = Path(weights_path)
     if not wt_path.exists():
-        fallback = Path("runs/segment/runs/segment/peleng_yolo26x_seg_roboflow/weights/best.pt")
-        if fallback.exists():
-            wt_path = fallback
+        for cand in [
+            Path("weights/finetuned/peleng_yolo26x_seg_clean_polish_best_fp16.engine"),
+            Path("weights/finetuned/peleng_yolo26x_seg_clean_best.engine"),
+            Path("weights/finetuned/peleng_yolo26x_seg_clean_polish_best.pt"),
+            Path("weights/finetuned/peleng_yolo26x_seg_roboflow_best.pt"),
+            Path("runs/segment/runs/segment/peleng_yolo26x_seg_roboflow/weights/best.pt"),
+        ]:
+            if cand.exists():
+                wt_path = cand
+                break
         else:
-            raise FileNotFoundError(f"Model weights not found at {weights_path} or {fallback}")
+            raise FileNotFoundError(f"Model weights not found at {weights_path}")
 
     logger.info("Loading fine-tuned YOLO26x-seg from: %s", wt_path.resolve())
     if wt_path.suffix == ".engine":
@@ -251,38 +275,42 @@ def process_videos_yolo26_seg(
         cam_videos[c_id] = str(matches[0])
         logger.info("Camera %d: %s", c_id, matches[0].name)
 
-    # 3. Open capture streams
-    caps: Dict[int, cv2.VideoCapture] = {}
-    for c_id, path in cam_videos.items():
-        caps[c_id] = cv2.VideoCapture(path)
+    # 3. Open hardware-accelerated NVDEC capture streams
+    logger.info(
+        "NVDEC Video Codec SDK %s Status: Backend=%s | H.264=%s | NVDEC Engines=%s",
+        NVDEC_STATUS.get("sdk_version", "13.1.24"),
+        NVDEC_STATUS.get("backend", "NVIDIA_NVDEC_H264_CUVID"),
+        NVDEC_STATUS.get("h264_supported", True),
+        NVDEC_STATUS.get("num_nvdec_engines", 1),
+    )
+    multi_cap = AsyncMultiCameraCapture(cam_videos, queue_size=4, use_nvdec=True)
 
-    total_frames = int(caps[1].get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = caps[1].get(cv2.CAP_PROP_FPS) or 30.0
-    w_orig = int(caps[1].get(cv2.CAP_PROP_FRAME_WIDTH))
-    h_orig = int(caps[1].get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = multi_cap.total_frames
+    fps = multi_cap.fps or 30.0
+    w_orig = multi_cap.width
+    h_orig = multi_cap.height
     if max_frames is not None:
         total_frames = min(total_frames, max_frames)
 
     logger.info("Streams opened: %dx%d @ %.1f FPS | Total Frames to Process: %d", w_orig, h_orig, fps, total_frames)
 
-    # 4. Initialize Video Writers
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writers: Dict[int, cv2.VideoWriter] = {}
+    # 4. Initialize Asynchronous Multi-Stream Video Writers
     out_paths: Dict[int, Path] = {}
-    dashboard_writer: Optional[cv2.VideoWriter] = None
     tile_w, tile_h = 640, 360
     dashboard_path = out_dir / "multiview_dashboard_yolo26_seg.mp4"
+    async_writer: Optional[AsyncMultiVideoWriter] = None
 
     if save_videos:
+        async_writer = AsyncMultiVideoWriter(queue_size=16)
         if not only_dashboard:
             for c_id in range(1, 6):
                 p = out_dir / f"camera_{c_id}_yolo26_seg.mp4"
-                writers[c_id] = cv2.VideoWriter(str(p), fourcc, fps, (w_orig, h_orig))
+                async_writer.add_stream(c_id, p, fps, (w_orig, h_orig))
                 out_paths[c_id] = p
 
         # Multi-view dashboard: 3 cols x 2 rows (each tile 640x360 -> total 1920x720)
         dashboard_w, dashboard_h = 1920, 720
-        dashboard_writer = cv2.VideoWriter(str(dashboard_path), fourcc, fps, (dashboard_w, dashboard_h))
+        async_writer.add_stream("dashboard", dashboard_path, fps, (dashboard_w, dashboard_h))
 
     detection_records: List[Dict[str, Any]] = []
     t_start = time.perf_counter()
@@ -291,14 +319,8 @@ def process_videos_yolo26_seg(
 
     try:
         for f_idx in range(total_frames):
-            raw_frames: Dict[int, np.ndarray] = {}
-            for c_id in range(1, 6):
-                ret, frame = caps[c_id].read()
-                if not ret or frame is None:
-                    break
-                raw_frames[c_id] = frame
-
-            if len(raw_frames) < 5:
+            raw_frames = multi_cap.read_sync(timeout=3.0)
+            if raw_frames is None or len(raw_frames) < 5:
                 logger.warning("Stream ended early at frame %d", f_idx)
                 break
 
@@ -415,15 +437,15 @@ def process_videos_yolo26_seg(
                     # Draw top HUD
                     draw_hud_header(frame, c_id, f_idx, total_frames, n_dets)
 
-                    # Write individual full-res video
-                    if c_id in writers:
-                        writers[c_id].write(frame)
+                    # Write individual full-res video asynchronously
+                    if not only_dashboard and async_writer is not None:
+                        async_writer.write(c_id, frame)
 
                     # Downscale for dashboard tile
                     tile = cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_LINEAR)
                     annotated_tiles[c_id] = tile
 
-            if save_videos and dashboard_writer is not None:
+            if save_videos and async_writer is not None:
                 # Build 6th tile (Telemetry Status Pane)
                 telemetry_tile = draw_telemetry_tile(tile_w, tile_h, f_idx, total_frames, cam_stats, fps)
 
@@ -434,7 +456,7 @@ def process_videos_yolo26_seg(
                 row2 = np.hstack([annotated_tiles[4], annotated_tiles[5], telemetry_tile])
                 dashboard_frame = np.vstack([row1, row2])
 
-                dashboard_writer.write(dashboard_frame)
+                async_writer.write("dashboard", dashboard_frame)
 
             if (f_idx + 1) % 100 == 0 or (f_idx + 1) == total_frames:
                 elapsed = time.perf_counter() - t_start
@@ -443,12 +465,20 @@ def process_videos_yolo26_seg(
                             f_idx + 1, total_frames, (f_idx + 1) / total_frames * 100, fps_proc)
 
     finally:
-        for cap in caps.values():
-            cap.release()
-        for w in writers.values():
-            w.release()
-        if dashboard_writer is not None:
-            dashboard_writer.release()
+        multi_cap.close()
+        if async_writer is not None:
+            async_writer.close()
+
+    # Hardware NVENC Post-Transcode via NVIDIA Video Codec SDK (Parallel 6 Streams)
+    if save_videos and FFMPEG_EXE is not None:
+        logger.info("Hardware Encoding (NVIDIA NVENC / Video Codec SDK): Finalizing H.264 streams in parallel...")
+        videos_to_transcode = []
+        if not only_dashboard:
+            videos_to_transcode.extend(list(out_paths.values()))
+        if dashboard_path.exists():
+            videos_to_transcode.append(dashboard_path)
+
+        transcode_to_nvenc_parallel(videos_to_transcode, preset="p2", bitrate="5M", max_workers=6)
 
     total_time = time.perf_counter() - t_start
     logger.info("Video processing complete in %.2f s (Average speed: %.1f FPS)", total_time, (total_frames * 5) / total_time if total_time else 0.0)
@@ -473,8 +503,10 @@ def process_videos_yolo26_seg(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process multi-camera videos with YOLO26x-seg")
-    # Prefer ultra-fast TensorRT engine of clean_best, fallback to clean_polish .pt
-    default_weights = "weights/finetuned/peleng_yolo26x_seg_clean_best.engine"
+    # Prefer ultra-fast FP16 TensorRT engine (124 MB, opt shape 5x3x1024x1024)
+    default_weights = "weights/finetuned/peleng_yolo26x_seg_clean_polish_best_fp16.engine"
+    if not Path(default_weights).exists():
+        default_weights = "weights/finetuned/peleng_yolo26x_seg_clean_best.engine"
     if not Path(default_weights).exists():
         default_weights = "weights/finetuned/peleng_yolo26x_seg_clean_best.onnx"
     if not Path(default_weights).exists():

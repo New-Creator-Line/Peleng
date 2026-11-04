@@ -144,6 +144,9 @@ def run_pipeline(
     prev_init_pt = None
 
     reproj_w_scale = 0.06 if is_yolo_bbox else 0.0
+    alpha_2d_heading = 0.15 if is_yolo_bbox else 0.0
+    delta_l_cabin = 800.0 if is_yolo_bbox else 0.0
+    delta_z_cabin = -65.0 if is_yolo_bbox else 0.0
     t_recon_start = time.perf_counter()
 
     for frame_idx in range(max_frame + 1):
@@ -151,6 +154,48 @@ def run_pipeline(
         valid_obs = [dict(o) for o in obs_list if o['conf'] >= conf_threshold and o['cam_id'] in cameras]
         for o in valid_obs:
             o['is_occluded'] = is_box_occluded(o)
+
+        # Predictive 2D heading shift before triangulation (alpha_2d_heading = 0.15)
+        if alpha_2d_heading > 0.0:
+            if tracker.is_initialized:
+                if tracker_type.lower() == "ukf":
+                    psi_curr = tracker.get_cabin_yaw()
+                    ref_3d: Optional[np.ndarray] = tracker.get_body_position()
+                    fwd_3d = np.array([math.cos(psi_curr), math.sin(psi_curr), 0.0], dtype=np.float64)
+                else:
+                    ref_3d = tracker.get_position()
+                    vel_curr = tracker.get_velocity()
+                    v_xy = float(np.linalg.norm(vel_curr[:2]))
+                    fwd_3d = (
+                        np.array([vel_curr[0] / v_xy, vel_curr[1] / v_xy, 0.0], dtype=np.float64)
+                        if v_xy > 30.0
+                        else np.array([math.cos(0.77), math.sin(0.77), 0.0], dtype=np.float64)
+                    )
+            else:
+                ref_3d = None
+                fwd_3d = np.array([math.cos(0.77), math.sin(0.77), 0.0], dtype=np.float64)
+
+            for o in valid_obs:
+                cm = cameras[o['cam_id']].get_model(frame_idx)
+                base_pt = ref_3d if ref_3d is not None else cm.project_ray_to_z(o['u'], o['v'], target_z=400.0)
+                if base_pt is not None:
+                    v_cam = cm.loc - base_pt
+                    v_cam /= (float(np.linalg.norm(v_cam)) + 1e-9)
+                    mu = float(np.dot(v_cam, fwd_3d))
+                    eff_alpha = (alpha_2d_heading * 0.65) - 0.15 * mu
+                    u0, v0, z0 = cm.project_point(base_pt)
+                    u1, v1, z1 = cm.project_point(base_pt + fwd_3d * 500.0)
+                    if z0 > 0 and z1 > 0:
+                        du, dv = u1 - u0, v1 - v0
+                        dn = math.hypot(du, dv)
+                        if dn > 1e-3:
+                            ux, uy = du / dn, dv / dn
+                            o['u'] = float(o['u'] + ux * eff_alpha * o.get('w', 0.0))
+                            o['v'] = float(
+                                o['v']
+                                + uy * (eff_alpha * 0.4) * o.get('h', 0.0)
+                                + 0.04 * o.get('h', 0.0)
+                            )
 
         # Group observations by camera ID
         by_cam: Dict[int, List[Dict[str, Any]]] = {}
@@ -168,8 +213,10 @@ def run_pipeline(
             for i in range(len(cam_ids)):
                 for j in range(i + 1, len(cam_ids)):
                     c1, c2 = cam_ids[i], cam_ids[j]
-                    P1 = cameras[c1].get_model(frame_idx).get_projection_matrix()
-                    P2 = cameras[c2].get_model(frame_idx).get_projection_matrix()
+                    m1 = cameras[c1].get_model(frame_idx)
+                    m2 = cameras[c2].get_model(frame_idx)
+                    P1 = m1.get_projection_matrix()
+                    P2 = m2.get_projection_matrix()
                     for o1 in by_cam[c1][:2]:
                         for o2 in by_cam[c2][:2]:
                             pair_thr = 35.0
@@ -178,36 +225,75 @@ def run_pipeline(
                             )
                             if cand_pt is None or cand_err > pair_thr:
                                 continue
-                            if not (-500.0 <= cand_pt[2] <= 2500.0):
-                                continue
+                            if is_yolo_bbox:
+                                if not (260.0 <= cand_pt[2] <= 1200.0):
+                                    continue
+                                r1 = cand_pt - m1.loc
+                                r2 = cand_pt - m2.loc
+                                cos_par = abs(
+                                    float(np.dot(r1, r2))
+                                    / (float(np.linalg.norm(r1) * np.linalg.norm(r2)) + 1e-9)
+                                )
+                                par_deg = math.degrees(math.acos(min(1.0, cos_par)))
+                                if par_deg < 16.0:
+                                    continue
+                            else:
+                                if not (-500.0 <= cand_pt[2] <= 2500.0):
+                                    continue
+
                             is_pair_occ = o1.get('is_occluded', False) or o2.get('is_occluded', False)
-                            if cand_err < best_score:
-                                best_score = cand_err
+                            inlier_count = 2
+                            for k, c3 in enumerate(cam_ids):
+                                if k in (i, j):
+                                    continue
+                                m3 = cameras[c3].get_model(frame_idx)
+                                u_p, v_p, z_c = m3.project_point(cand_pt)
+                                if z_c <= 0:
+                                    continue
+                                for o3 in by_cam[c3][:2]:
+                                    if math.hypot(u_p - o3['u'], v_p - o3['v']) < 28.0:
+                                        inlier_count += 1
+                                        break
+
+                            score = (
+                                cand_err
+                                - 12.0 * inlier_count
+                                + (16.0 if is_pair_occ else 0.0)
+                            )
+                            if score < best_score:
+                                best_score = score
                                 pt_3d, err = cand_pt, cand_err
                                 best_had_occlusion = is_pair_occ
 
         # Filter Step
         if tracker_type.lower() == "ukf":
-            # 10D UKF Branch
+            # 10D UKF Branch with Analytical Cabin Pivot Alignment & Occlusion Guard
             if pt_3d is not None and err < 65.0:
                 pt_meas = pt_3d.copy()
                 if not tracker.is_initialized:
                     # Initialize position from 3D triangulation
-                    tracker.initialize(pt_meas)
-                    prev_init_pt = pt_meas.copy()
-                    curr_pos = pt_meas
+                    tracker.initialize(
+                        pt_meas,
+                        init_yaw=0.77 if is_yolo_bbox else 0.0,
+                        apply_cabin_shift=is_yolo_bbox,
+                        delta_l_cabin=delta_l_cabin,
+                        delta_z_cabin=delta_z_cabin,
+                    )
+                    curr_pos = tracker.get_position()
                 else:
-                    if prev_init_pt is not None:
-                        d_init = pt_meas - prev_init_pt
-                        v_init = float(np.linalg.norm(d_init[:2])) / tracker.dt
-                        if v_init > 10.0:
-                            tracker.x[3] = v_init
-                            tracker.x[4] = math.atan2(d_init[1], d_init[0])
-                        prev_init_pt = None
-
                     tracker.predict()
-                    r_var = max(25.0, (err / 2.0) ** 2 * (1.8 if best_had_occlusion else 1.0))
-                    tracker.update_3d_point(pt_meas, R_cov=np.eye(3) * r_var, is_centroid=False, chi2_thresh=99999.0)
+                    r_var = max(25.0, (err / 2.0) ** 2)
+                    noise_scale = 3.0 if best_had_occlusion else 1.0
+                    tracker.update_3d_measurement(
+                        pt_meas,
+                        R_cov=np.eye(3) * r_var,
+                        noise_scale=noise_scale,
+                        apply_cabin_shift=is_yolo_bbox,
+                        delta_l_cabin=delta_l_cabin,
+                        delta_z_cabin=delta_z_cabin,
+                        is_centroid=False,
+                        chi2_thresh=99999.0,
+                    )
 
                     # Online dimension calibration: update with bounding box from most confident camera
                     if by_cam:
@@ -217,24 +303,39 @@ def run_pipeline(
                             cameras[best_cid].get_model(frame_idx),
                             best_c_o['u'], best_c_o['v'],
                             best_c_o['w'], best_c_o['h'],
-                            is_truncated=best_c_o.get('is_truncated', False),
+                            is_truncated=best_c_o.get('is_truncated', False) or best_c_o.get('is_occluded', False),
                         )
                     curr_pos = tracker.get_position()
                 triangulated_count += 1
             elif tracker.is_initialized and valid_obs:
-                # Single-camera ray update (Kt = 1) using known road elevation
+                # Single-camera ray update (Kt = 1) using road elevation relaxation
+                tracker.x[6] *= 0.7
                 tracker.predict()
                 best_single = max(valid_obs, key=lambda x: x['conf'])
                 cam_model = cameras[best_single['cam_id']].get_model(frame_idx)
-                target_z = float(np.clip(tracker.x[2], 300.0, 520.0)) if tracker.is_initialized else 400.0
+                body_z = float(tracker.get_body_position()[2])
+                if is_yolo_bbox:
+                    target_z = float(0.80 * np.clip(body_z, 320.0, 500.0) + 0.20 * 365.0)
+                else:
+                    target_z = float(np.clip(body_z, 300.0, 520.0))
                 ray_pt = cam_model.project_ray_to_z(best_single['u'], best_single['v'], target_z=target_z)
                 if ray_pt is not None:
-                    tracker.update_3d_point(ray_pt, R_cov=np.diag([300.0, 300.0, 100.0]), chi2_thresh=99999.0)
+                    single_occ = bool(best_single.get('is_occluded', False))
+                    noise_scale = 3.5 if single_occ else 1.5
+                    tracker.update_3d_measurement(
+                        ray_pt,
+                        R_cov=np.diag([200.0, 200.0, 80.0]),
+                        noise_scale=noise_scale,
+                        apply_cabin_shift=is_yolo_bbox,
+                        delta_l_cabin=delta_l_cabin,
+                        delta_z_cabin=delta_z_cabin,
+                        chi2_thresh=99999.0,
+                    )
                     tracker.update_camera_box(
                         cam_model,
                         best_single['u'], best_single['v'],
                         best_single['w'], best_single['h'],
-                        is_truncated=best_single.get('is_truncated', False),
+                        is_truncated=best_single.get('is_truncated', False) or single_occ,
                     )
                 curr_pos = tracker.get_position()
                 single_cam_count += 1
@@ -248,8 +349,14 @@ def run_pipeline(
                     cam_model = cameras[best_single['cam_id']].get_model(frame_idx)
                     est_single = cam_model.project_ray_to_z(best_single['u'], best_single['v'], target_z=400.0)
                     if est_single is not None:
-                        tracker.initialize(est_single)
-                        curr_pos = est_single
+                        tracker.initialize(
+                            est_single,
+                            init_yaw=0.77 if is_yolo_bbox else 0.0,
+                            apply_cabin_shift=is_yolo_bbox,
+                            delta_l_cabin=delta_l_cabin,
+                            delta_z_cabin=delta_z_cabin,
+                        )
+                        curr_pos = tracker.get_position()
                     else:
                         curr_pos = np.zeros(3)
                 else:
@@ -343,9 +450,8 @@ def run_pipeline(
     else:
         out_df = pd.DataFrame(estimated_records)
 
-    # If detections come from real YOLO bounding boxes (centered on truck body),
-    # project to the Unreal Engine Actor origin (at front bumper/pivot) along the vehicle heading
-    if is_yolo_bbox and len(out_df) > 0:
+    # Legacy Linear KF fallback post-shift (UKF performs analytical cabin shift internally)
+    if tracker_type.lower() != "ukf" and is_yolo_bbox and len(out_df) > 0:
         raw_xyz = out_df[["Loc_X", "Loc_Y", "Loc_Z"]].to_numpy(dtype=np.float64)
         shifted_xyz = raw_xyz.copy()
         for f_i in range(len(raw_xyz)):
@@ -354,9 +460,8 @@ def run_pipeline(
             dv = raw_xyz[f1, :2] - raw_xyz[f0, :2]
             dn = float(np.linalg.norm(dv))
             if dn > 10.0:
-                shifted_xyz[f_i, 0] += (dv[0] / dn) * 1120.0
-                shifted_xyz[f_i, 1] += (dv[1] / dn) * 1120.0
-                shifted_xyz[f_i, 2] -= 80.0
+                shifted_xyz[f_i, 0] += (dv[0] / dn) * 800.0
+                shifted_xyz[f_i, 1] += (dv[1] / dn) * 800.0
         out_df["Loc_X"] = np.round(shifted_xyz[:, 0], 4)
         out_df["Loc_Y"] = np.round(shifted_xyz[:, 1], 4)
         out_df["Loc_Z"] = np.round(shifted_xyz[:, 2], 4)

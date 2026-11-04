@@ -6,6 +6,7 @@ from src.camera_model import CameraModel
 from src.cuboid_model import TruckCuboid3D, project_cuboid_to_camera_bbox
 from src.tracker_ukf import (
     UKF10DTracker,
+    compute_cabin_pivot_shift,
     normalize_angle,
     circular_mean,
 )
@@ -194,3 +195,43 @@ def test_ukf_online_dimension_convergence():
     assert est_L > 500.0  # Increased significantly toward 629
     assert est_W > 178.0  # Increased toward 207
     assert est_H > 180.0  # Increased toward 212
+
+
+def test_ukf_analytical_cabin_pivot_shift_and_noise_scale():
+    """
+    Verify analytical cabin pivot shift along heading psi and dynamic covariance noise scaling
+    in update_3d_measurement.
+    """
+    shift_0 = compute_cabin_pivot_shift(0.0, delta_l_cabin=800.0, delta_z_cabin=-65.0)
+    assert np.allclose(shift_0, np.array([800.0, 0.0, -65.0]))
+
+    shift_90 = compute_cabin_pivot_shift(math.pi / 2.0, delta_l_cabin=800.0, delta_z_cabin=-65.0)
+    assert np.allclose(shift_90, np.array([0.0, 800.0, -65.0]), atol=1e-4)
+
+    tracker = UKF10DTracker(dt=0.1, process_noise_std=0.0)
+    tracker.initialize(
+        init_pos=np.array([0.0, 0.0, 400.0]),
+        init_yaw=0.0,
+        init_speed=0.0,
+        apply_cabin_shift=True,
+        delta_l_cabin=800.0,
+        delta_z_cabin=-65.0,
+    )
+    # Initial position should immediately reflect cabin pivot at [800, 0, 335]
+    assert np.allclose(tracker.get_position(), np.array([800.0, 0.0, 335.0]))
+    assert np.allclose(tracker.get_body_position(), np.array([0.0, 0.0, 400.0]))
+
+    tracker.predict()
+    accepted = tracker.update_3d_measurement(
+        np.array([10.0, 0.0, 400.0]),
+        R_cov=np.eye(3) * 10.0,
+        noise_scale=2.5,
+        apply_cabin_shift=True,
+        delta_l_cabin=800.0,
+        delta_z_cabin=-65.0,
+    )
+    assert accepted is True
+    pos = tracker.get_position()
+    assert pos[0] > 800.0
+    assert math.isclose(pos[2], 335.0, abs_tol=1.0)
+

@@ -97,7 +97,9 @@ def plot_trajectory_comparison(
               fancybox=True, shadow=True, ncol=6, fontsize=11)
 
     plt.tight_layout()
-    plt.savefig(output_png_path, dpi=150, bbox_inches='tight')
+    norm_path = os.path.abspath(output_png_path)
+    os.makedirs(os.path.dirname(norm_path) or ".", exist_ok=True)
+    plt.savefig(norm_path, dpi=150, bbox_inches='tight')
     plt.close()
 
 
@@ -142,5 +144,7 @@ def plot_dimension_convergence(
 
     ax.legend(loc='upper right', fancybox=True, shadow=True, ncol=2, fontsize=10)
     plt.tight_layout()
-    plt.savefig(output_png_path, dpi=150, bbox_inches='tight')
+    norm_path = os.path.abspath(output_png_path)
+    os.makedirs(os.path.dirname(norm_path) or ".", exist_ok=True)
+    plt.savefig(norm_path, dpi=150, bbox_inches='tight')
     plt.close()

@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from src.tracker_ukf import FilterStepRecord, normalize_angle
+from src.tracker_ukf import FilterStepRecord, compute_cabin_pivot_shift, normalize_angle
 
 
 class RTSSmoother10D:
@@ -81,6 +81,31 @@ class RTSSmoother10D:
 
             x_smooth[t] = x_t_T
             P_smooth[t] = P_t_T
+
+        # Apply analytical cabin pivot alignment along zero-lag smoothed heading psi_{t|T}
+        has_cabin_shift = any(
+            abs(rec.delta_l_cabin) > 1e-6 or abs(rec.delta_z_cabin) > 1e-6
+            for rec in history
+        )
+        if has_cabin_shift and T > 1:
+            body_xy = np.array([[st[0], st[1]] for st in x_smooth], dtype=np.float64)
+            dt_nom = 1.0 / 30.0
+            last_psi = 0.77
+            for t in range(T):
+                i0 = max(0, t - 8)
+                i1 = min(T - 1, t + 8)
+                dv = body_xy[i1] - body_xy[i0]
+                dn = float(np.linalg.norm(dv))
+                if dn > 10.0:
+                    last_psi = math.atan2(float(dv[1]), float(dv[0]))
+                    dt_span = max(1, i1 - i0) * dt_nom
+                    x_smooth[t][3] = dn / dt_span
+                x_smooth[t][4] = normalize_angle(last_psi)
+                rec = history[t]
+                if abs(rec.delta_l_cabin) > 1e-6 or abs(rec.delta_z_cabin) > 1e-6:
+                    x_smooth[t][0:3] += compute_cabin_pivot_shift(
+                        x_smooth[t][4], rec.delta_l_cabin, rec.delta_z_cabin
+                    )
 
         # Format output records
         results: List[Dict[str, Any]] = []

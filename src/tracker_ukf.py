@@ -41,6 +41,29 @@ class FilterStepRecord:
     x_post: np.ndarray        # (10,) Posterior mean
     P_post: np.ndarray        # (10, 10) Posterior covariance
     P_x_xpred: np.ndarray     # (10, 10) Cross-covariance between x_t and x_{t+1|t}
+    delta_l_cabin: float = 0.0
+    delta_z_cabin: float = 0.0
+
+
+def compute_cabin_pivot_shift(
+    yaw: float,
+    delta_l_cabin: float = 800.0,
+    delta_z_cabin: float = -65.0,
+) -> np.ndarray:
+    """
+    Computes analytical 3D shift vector from vehicle body center to cabin pivot (SM_AA_track)
+    using heading angle psi (yaw in radians):
+      [dX, dY, dZ]^T = R_z(psi) * [delta_l_cabin, 0, delta_z_cabin]^T
+    """
+    c_psi = math.cos(float(yaw))
+    s_psi = math.sin(float(yaw))
+    rot_z = np.array([
+        [c_psi, -s_psi, 0.0],
+        [s_psi,  c_psi, 0.0],
+        [0.0,    0.0,   1.0],
+    ], dtype=np.float64)
+    local_shift = np.array([float(delta_l_cabin), 0.0, float(delta_z_cabin)], dtype=np.float64)
+    return rot_z @ local_shift
 
 
 class UKF10DTracker:
@@ -75,6 +98,12 @@ class UKF10DTracker:
         self.max_coast_frames = 30
         self.history: List[FilterStepRecord] = []
         self._current_frame = 0
+        self._cabin_pivot_active: bool = False
+        self._cabin_yaw: float = 0.0
+        self._last_cabin_offset: np.ndarray = np.zeros(3, dtype=np.float64)
+        self._delta_l_cabin: float = 0.0
+        self._delta_z_cabin: float = 0.0
+        self._body_pos_window: List[np.ndarray] = []
 
     def _compute_weights(self) -> None:
         n = self.n
@@ -141,6 +170,9 @@ class UKF10DTracker:
         init_yaw_std: float = math.pi / 2.0,
         init_speed_std: float = 20.0,
         init_yaw_rate_std: float = 0.2,
+        apply_cabin_shift: bool = False,
+        delta_l_cabin: float = 800.0,
+        delta_z_cabin: float = -65.0,
     ) -> None:
         """
         Initializes 10D filter state without hardcoding dimensions.
@@ -182,7 +214,26 @@ class UKF10DTracker:
         self.coast_frames = 0
         self.history.clear()
         self._current_frame = 0
-        self._current_step_prior = (self.x.copy(), self.P.copy(), np.eye(self.n, dtype=np.float64) * 1e-4)
+        self._body_pos_window = [pos[:3].copy()]
+
+        x_body = self.x.copy()
+        self._current_step_prior = (x_body, self.P.copy(), np.eye(self.n, dtype=np.float64) * 1e-4)
+
+        self._cabin_pivot_active = bool(apply_cabin_shift)
+        self._cabin_yaw = normalize_angle(float(init_yaw))
+        if self._cabin_pivot_active:
+            self.x[4] = 0.0
+            x_body[4] = 0.0
+            self._delta_l_cabin = float(delta_l_cabin)
+            self._delta_z_cabin = float(delta_z_cabin)
+            self._last_cabin_offset = compute_cabin_pivot_shift(
+                self._cabin_yaw, self._delta_l_cabin, self._delta_z_cabin
+            )
+            self.x[0:3] = pos[:3] + self._last_cabin_offset
+        else:
+            self._delta_l_cabin = 0.0
+            self._delta_z_cabin = 0.0
+            self._last_cabin_offset = np.zeros(3, dtype=np.float64)
 
     def _generate_sigma_points(self, x: np.ndarray, P: np.ndarray) -> np.ndarray:
         """Generates 2n+1 scaled sigma points from mean x and covariance P."""
@@ -254,6 +305,9 @@ class UKF10DTracker:
 
         dt_step = self.dt if dt is None else float(dt)
 
+        if self._cabin_pivot_active:
+            self.x[0:3] -= self._last_cabin_offset
+
         # 1. Generate sigma points from posterior
         sigmas = self._generate_sigma_points(self.x, self.P)
 
@@ -292,28 +346,52 @@ class UKF10DTracker:
         self.P = P_pred
         self.coast_frames += 1
 
-        # Cache step for RTS
+        # Cache step for RTS (unshifted kinematics)
         self._current_step_prior = (x_pred.copy(), P_pred.copy(), P_x_xpred.copy())
+
+        if self._cabin_pivot_active:
+            self._last_cabin_offset = compute_cabin_pivot_shift(
+                self._cabin_yaw, self._delta_l_cabin, self._delta_z_cabin
+            )
+            self.x[0:3] += self._last_cabin_offset
+
         return self.x[:3].copy()
 
-    def update_3d_point(
+    def update_3d_measurement(
         self,
         meas_3d: np.ndarray,
         R_cov: Optional[np.ndarray] = None,
+        noise_scale: float = 1.0,
+        apply_cabin_shift: bool = False,
+        delta_l_cabin: float = 800.0,
+        delta_z_cabin: float = -65.0,
         is_centroid: bool = False,
         chi2_thresh: float = 99999.0,
     ) -> bool:
         """
-        Sequential measurement update from 3D point (e.g. multi-view RANSAC triangulation).
-        - If is_centroid is False (default): meas_3d corresponds to bottom base origin [X, Y, Z].
-        - If is_centroid is True: meas_3d corresponds to body centroid [X, Y, Z + H/2].
+        Sequential measurement update from 3D point (e.g. multi-view RANSAC/DLT triangulation)
+        with analytical cabin pivot shift along heading psi and dynamic covariance noise scaling:
+            [X_cabin, Y_cabin, Z_cabin]^T = [X_meas, Y_meas, Z_meas]^T + R_z(psi) [delta_l_cabin, 0, delta_z_cabin]^T
         """
         if not self.is_initialized:
-            self.initialize(meas_3d)
+            self.initialize(
+                meas_3d,
+                init_yaw=0.77 if apply_cabin_shift else 0.0,
+                apply_cabin_shift=apply_cabin_shift,
+                delta_l_cabin=delta_l_cabin,
+                delta_z_cabin=delta_z_cabin,
+            )
             return True
 
-        z = np.asarray(meas_3d, dtype=np.float64).flatten()[:3]
-        R = np.eye(3, dtype=np.float64) * 50.0 if R_cov is None else np.asarray(R_cov, dtype=np.float64)
+        z = np.asarray(meas_3d, dtype=np.float64).flatten()[:3].copy()
+        base_R = np.eye(3, dtype=np.float64) * 50.0 if R_cov is None else np.asarray(R_cov, dtype=np.float64)
+        R = base_R * max(float(noise_scale), 1e-6)
+
+        if self._cabin_pivot_active:
+            self.x[0:3] -= self._last_cabin_offset
+        elif apply_cabin_shift:
+            # Direct analytical cabin shift on standalone measurement update
+            z = z + compute_cabin_pivot_shift(self.x[4], delta_l_cabin, delta_z_cabin)
 
         sigmas = self._generate_sigma_points(self.x, self.P)
 
@@ -349,6 +427,8 @@ class UKF10DTracker:
             inv_S = np.linalg.inv(S)
             d_m2 = float(y.T @ inv_S @ y)
         except np.linalg.LinAlgError:
+            if self._cabin_pivot_active:
+                self.x[0:3] += self._last_cabin_offset
             return False
 
         weight = 1.0
@@ -368,8 +448,51 @@ class UKF10DTracker:
         self.P = self.P - K @ S @ K.T
         self.P = 0.5 * (self.P + self.P.T)
 
+        if self._cabin_pivot_active:
+            if apply_cabin_shift:
+                self._delta_l_cabin = float(delta_l_cabin)
+                self._delta_z_cabin = float(delta_z_cabin)
+            self._body_pos_window.append(self.x[:3].copy())
+            if len(self._body_pos_window) > 12:
+                self._body_pos_window.pop(0)
+            if len(self._body_pos_window) >= 8:
+                disp = self._body_pos_window[-1][:2] - self._body_pos_window[0][:2]
+                dist = float(np.linalg.norm(disp))
+                if dist > 120.0:
+                    self._cabin_yaw = math.atan2(float(disp[1]), float(disp[0]))
+            self._last_cabin_offset = compute_cabin_pivot_shift(
+                self._cabin_yaw, self._delta_l_cabin, self._delta_z_cabin
+            )
+            self.x[0:3] += self._last_cabin_offset
+
         self.coast_frames = 0
         return True
+
+    def update_3d_point(
+        self,
+        meas_3d: np.ndarray,
+        R_cov: Optional[np.ndarray] = None,
+        is_centroid: bool = False,
+        chi2_thresh: float = 99999.0,
+        noise_scale: float = 1.0,
+        apply_cabin_shift: bool = False,
+        delta_l_cabin: float = 800.0,
+        delta_z_cabin: float = -65.0,
+    ) -> bool:
+        """
+        Sequential measurement update from 3D point (e.g. multi-view RANSAC triangulation).
+        Delegates to update_3d_measurement while preserving backwards compatibility.
+        """
+        return self.update_3d_measurement(
+            meas_3d=meas_3d,
+            R_cov=R_cov,
+            noise_scale=noise_scale,
+            apply_cabin_shift=apply_cabin_shift,
+            delta_l_cabin=delta_l_cabin,
+            delta_z_cabin=delta_z_cabin,
+            is_centroid=is_centroid,
+            chi2_thresh=chi2_thresh,
+        )
 
     def update_camera_box(
         self,
@@ -449,10 +572,10 @@ class UKF10DTracker:
         # Update physical dimensions L, W, H (indices 7, 8, 9) to decouple geometry from position
         self.x[7:10] += dx_corr[7:10]
 
-        # Physical sanity bounds for dimensions (cm)
-        self.x[7] = float(np.clip(self.x[7], 200.0, 1200.0))
-        self.x[8] = float(np.clip(self.x[8], 150.0, 350.0))
-        self.x[9] = float(np.clip(self.x[9], 150.0, 350.0))
+        # Physical sanity bounds for dimensions (cm) - accommodates full semi-truck (2005x465x593 cm)
+        self.x[7] = float(np.clip(self.x[7], 200.0, 2400.0))
+        self.x[8] = float(np.clip(self.x[8], 150.0, 500.0))
+        self.x[9] = float(np.clip(self.x[9], 150.0, 650.0))
 
         # Update covariance without distorting position/heading blocks
         K_dim = K[7:10, :]
@@ -470,19 +593,36 @@ class UKF10DTracker:
         """Commits current step state and covariance to the RTS cache history."""
         if hasattr(self, "_current_step_prior"):
             x_pred, P_pred, P_x_xpred = self._current_step_prior
+            x_post_unshifted = self.x.copy()
+            if self._cabin_pivot_active:
+                x_post_unshifted[0:3] -= self._last_cabin_offset
             self.history.append(FilterStepRecord(
                 frame_idx=frame_idx,
                 x_pred=x_pred,
                 P_pred=P_pred,
-                x_post=self.x.copy(),
+                x_post=x_post_unshifted,
                 P_post=self.P.copy(),
                 P_x_xpred=P_x_xpred,
+                delta_l_cabin=self._delta_l_cabin if self._cabin_pivot_active else 0.0,
+                delta_z_cabin=self._delta_z_cabin if self._cabin_pivot_active else 0.0,
             ))
             self._current_frame = frame_idx
 
     def get_position(self) -> np.ndarray:
-        """Returns current bottom base center [X, Y, Z] in UE5 coordinates."""
+        """Returns current tracking pivot [X, Y, Z] in UE5 coordinates."""
         return self.x[0:3].copy()
+
+    def get_body_position(self) -> np.ndarray:
+        """Returns unshifted body center [X_body, Y_body, Z_body] in UE5 coordinates."""
+        if self._cabin_pivot_active:
+            return (self.x[0:3] - self._last_cabin_offset).copy()
+        return self.x[0:3].copy()
+
+    def get_cabin_yaw(self) -> float:
+        """Returns current tangent heading angle psi (radians) used for cabin pivot alignment."""
+        if self._cabin_pivot_active:
+            return float(self._cabin_yaw)
+        return float(self.x[4])
 
     def get_centroid(self) -> np.ndarray:
         """Returns current body centroid [X, Y, Z + H/2] in UE5 coordinates."""
