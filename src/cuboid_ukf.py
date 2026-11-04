@@ -7,8 +7,7 @@
 4. Репроекция 8 вершин 3D-параллелепипеда в стабильный 2D Bounding Box (cuboid_to_camera_bbox).
 """
 
-from typing import Dict, List, Optional, Sequence, Tuple
-import cv2
+from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 from src.camera_model import CameraModel
@@ -142,16 +141,19 @@ def cuboid_world_corners(
     tm = truck or TruckModel()
     body_center = tm.center_from_pivot(cabin_xyz, yaw)
     hl, hw, hh = tm.length / 2.0, tm.width / 2.0, tm.height / 2.0
-    local_pts = np.array([
-        [-hl, -hw, -hh],
-        [ hl, -hw, -hh],
-        [ hl,  hw, -hh],
-        [-hl,  hw, -hh],
-        [-hl, -hw,  hh],
-        [ hl, -hw,  hh],
-        [ hl,  hw,  hh],
-        [-hl,  hw,  hh],
-    ], dtype=np.float64)
+    local_pts = np.array(
+        [
+            [-hl, -hw, -hh],
+            [hl, -hw, -hh],
+            [hl, hw, -hh],
+            [-hl, hw, -hh],
+            [-hl, -hw, hh],
+            [hl, -hw, hh],
+            [hl, hw, hh],
+            [-hl, hw, hh],
+        ],
+        dtype=np.float64,
+    )
     c, s = np.cos(yaw), np.sin(yaw)
     rot_z = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
     return (local_pts @ rot_z.T) + body_center.reshape(1, 3)
@@ -199,4 +201,3 @@ def project_cuboid_wireframe(
         return None
     pts_2d = (cam_pts @ cam.K.T)[:, :2] / cam_pts[:, 2:3]
     return pts_2d
-

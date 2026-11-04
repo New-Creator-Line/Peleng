@@ -51,7 +51,7 @@ def _read_prop(data: bytes, pos: int) -> Tuple[Any, int]:
     if t in _ARRAY_TYPES:
         length, encoding, comp_len = struct.unpack_from("<III", data, pos)
         pos += 12
-        raw = data[pos:pos + comp_len]
+        raw = data[pos : pos + comp_len]
         pos += comp_len
         if encoding == 1:
             raw = zlib.decompress(raw)
@@ -60,7 +60,7 @@ def _read_prop(data: bytes, pos: int) -> Tuple[Any, int]:
     if t in ("S", "R"):
         length = struct.unpack_from("<I", data, pos)[0]
         pos += 4
-        raw = data[pos:pos + length]
+        raw = data[pos : pos + length]
         pos += length
         if t == "S":
             return raw.decode("utf-8", errors="replace"), pos
@@ -79,7 +79,7 @@ def _read_node(data: bytes, pos: int, wide: bool) -> Tuple[Optional[FbxNode], in
     pos += 1
     if end_offset == 0:
         return None, pos
-    name = data[pos:pos + name_len].decode("ascii", errors="replace")
+    name = data[pos : pos + name_len].decode("ascii", errors="replace")
     pos += name_len
     node = FbxNode(name)
     for _ in range(num_props):
@@ -207,9 +207,19 @@ def load_fbx_vertices(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     root = read_fbx(path)
     settings = _properties70(root.find("GlobalSettings"))
-    info: Dict[str, Any] = {k: settings[k][0] for k in (
-        "UpAxis", "UpAxisSign", "FrontAxis", "FrontAxisSign",
-        "CoordAxis", "CoordAxisSign", "UnitScaleFactor") if k in settings and settings[k]}
+    info: Dict[str, Any] = {
+        k: settings[k][0]
+        for k in (
+            "UpAxis",
+            "UpAxisSign",
+            "FrontAxis",
+            "FrontAxisSign",
+            "CoordAxis",
+            "CoordAxisSign",
+            "UnitScaleFactor",
+        )
+        if k in settings and settings[k]
+    }
 
     objects = root.find("Objects")
     verts: List[np.ndarray] = []
@@ -221,12 +231,14 @@ def load_fbx_vertices(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
                 verts.append(np.asarray(v.props[0], dtype=np.float64).reshape(-1, 3))
         for model in objects.find_all("Model"):
             p = _properties70(model)
-            models.append({
-                "name": model.props[1] if len(model.props) > 1 else "",
-                "translation": p.get("Lcl Translation"),
-                "rotation": p.get("Lcl Rotation"),
-                "scaling": p.get("Lcl Scaling"),
-            })
+            models.append(
+                {
+                    "name": model.props[1] if len(model.props) > 1 else "",
+                    "translation": p.get("Lcl Translation"),
+                    "rotation": p.get("Lcl Rotation"),
+                    "scaling": p.get("Lcl Scaling"),
+                }
+            )
     info["models"] = models
     all_v = np.vstack(verts) if verts else np.zeros((0, 3))
     return all_v, info

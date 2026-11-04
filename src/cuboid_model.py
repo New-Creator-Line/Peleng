@@ -21,11 +21,14 @@ class TruckCuboid3D:
     """
     Oriented 3D Bounding Box for vehicle in Unreal Engine 5 coordinates.
     All positional and dimensional units are centimeters (cm).
-    - x, y, z: coordinates of the center of the bottom base on ground plane.
+    - x, y, z: coordinates of the cabin / front axle tracking pivot (SM_AA_track) on chassis/ground plane.
     - yaw: heading angle around UE5 vertical Z-axis in radians.
     - length: physical length along vehicle local forward axis (cm).
     - width: physical width along vehicle local lateral axis (cm).
     - height: physical height along vertical Z axis (cm).
+    - d_front: distance from cabin pivot to front bumper along +X_local (default: 150.0 cm).
+    - z_offset: vertical base offset relative to state Z (default: 0.0 cm, as state Z is aligned to chassis).
+    - use_cabin_pivot: if True (default), local X spans [d_front - L, +d_front]; if False, [-L/2, +L/2].
     """
     x: float
     y: float
@@ -34,9 +37,18 @@ class TruckCuboid3D:
     length: float
     width: float
     height: float
+    d_front: float = 150.0
+    z_offset: float = 0.0
+    use_cabin_pivot: bool = True
 
     @classmethod
-    def from_state_10d(cls, state: np.ndarray) -> "TruckCuboid3D":
+    def from_state_10d(
+        cls,
+        state: np.ndarray,
+        d_front: float = 150.0,
+        z_offset: float = 0.0,
+        use_cabin_pivot: bool = True,
+    ) -> "TruckCuboid3D":
         """Builds cuboid from 10D UKF state vector [X, Y, Z, v, yaw, omega, vz, L, W, H]^T."""
         st = np.asarray(state, dtype=np.float64).flatten()
         return cls(
@@ -47,33 +59,44 @@ class TruckCuboid3D:
             length=max(10.0, float(st[7])),
             width=max(10.0, float(st[8])),
             height=max(10.0, float(st[9])),
+            d_front=float(d_front),
+            z_offset=float(z_offset),
+            use_cabin_pivot=bool(use_cabin_pivot),
         )
 
     def get_local_vertices(self) -> np.ndarray:
         """
-        Returns 8 local vertices relative to the bottom base center (0, 0, 0):
+        Returns 8 local vertices relative to the cabin tracking pivot (0, 0, 0):
+        When use_cabin_pivot is True:
+          x_front = +d_front (~150 cm), x_rear = d_front - L
         Corners:
-          0: [-L/2, -W/2, 0]  (Rear-Left-Bottom)
-          1: [+L/2, -W/2, 0]  (Front-Left-Bottom)
-          2: [+L/2, +W/2, 0]  (Front-Right-Bottom)
-          3: [-L/2, +W/2, 0]  (Rear-Right-Bottom)
-          4: [-L/2, -W/2, H]  (Rear-Left-Top)
-          5: [+L/2, -W/2, H]  (Front-Left-Top)
-          6: [+L/2, +W/2, H]  (Front-Right-Top)
-          7: [-L/2, +W/2, H]  (Rear-Right-Top)
+          0: [x_rear,  -W/2, z_bot]  (Rear-Left-Bottom)
+          1: [x_front, -W/2, z_bot]  (Front-Left-Bottom)
+          2: [x_front, +W/2, z_bot]  (Front-Right-Bottom)
+          3: [x_rear,  +W/2, z_bot]  (Rear-Right-Bottom)
+          4: [x_rear,  -W/2, z_top]  (Rear-Left-Top)
+          5: [x_front, -W/2, z_top]  (Front-Left-Top)
+          6: [x_front, +W/2, z_top]  (Front-Right-Top)
+          7: [x_rear,  +W/2, z_top]  (Rear-Right-Top)
         """
-        dx = self.length / 2.0
+        if self.use_cabin_pivot:
+            x_front = float(self.d_front)
+            x_rear = float(self.d_front - self.length)
+        else:
+            x_front = self.length / 2.0
+            x_rear = -self.length / 2.0
         dy = self.width / 2.0
-        h = self.height
+        z_bot = float(self.z_offset)
+        z_top = float(self.z_offset + self.height)
         return np.array([
-            [-dx, -dy, 0.0],
-            [+dx, -dy, 0.0],
-            [+dx, +dy, 0.0],
-            [-dx, +dy, 0.0],
-            [-dx, -dy, h],
-            [+dx, -dy, h],
-            [+dx, +dy, h],
-            [-dx, +dy, h],
+            [x_rear,  -dy, z_bot],
+            [x_front, -dy, z_bot],
+            [x_front, +dy, z_bot],
+            [x_rear,  +dy, z_bot],
+            [x_rear,  -dy, z_top],
+            [x_front, -dy, z_top],
+            [x_front, +dy, z_top],
+            [x_rear,  +dy, z_top],
         ], dtype=np.float64)
 
     def get_world_vertices(self) -> np.ndarray:
@@ -91,8 +114,15 @@ class TruckCuboid3D:
         return world_v
 
     def get_centroid(self) -> np.ndarray:
-        """Returns the geometric 3D center of the vehicle body: [X, Y, Z + H/2]^T."""
-        return np.array([self.x, self.y, self.z + self.height / 2.0], dtype=np.float64)
+        """Returns the geometric 3D center of the vehicle body in world UE5 coordinates."""
+        x_local_c = (self.d_front - self.length / 2.0) if self.use_cabin_pivot else 0.0
+        c = math.cos(self.yaw)
+        s = math.sin(self.yaw)
+        return np.array([
+            self.x + x_local_c * c,
+            self.y + x_local_c * s,
+            self.z + self.z_offset + self.height / 2.0,
+        ], dtype=np.float64)
 
     @staticmethod
     def get_edges() -> List[Tuple[int, int]]:
@@ -165,17 +195,15 @@ def compute_uncertainty_ellipsoid_3d(
     # 3. Eigendecomposition (eigh guaranteed real for symmetric matrix)
     eigvals, eigvecs = np.linalg.eigh(cov_reg)
 
-    # 4. Clip negative or near-zero eigenvalues to positive threshold
+    # 4. Clip eigenvalues to positive threshold
     eigvals_clipped = np.maximum(eigvals, 1e-6)
 
-    # 5. Semi-axes radii r_i = sqrt(chi2 * lambda_i)
-    radii = np.sqrt(eigvals_clipped * chi2_val)
+    # 5. Guaranteed positive semi-definite covariance & inverse reconstruction
+    cov_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
+    inv_cov_psd = eigvecs @ np.diag(1.0 / eigvals_clipped) @ eigvecs.T
 
-    # 6. Inverse covariance matrix for Mahalanobis distance
-    try:
-        inv_cov = np.linalg.inv(cov_reg)
-    except np.linalg.LinAlgError:
-        inv_cov = np.diag(1.0 / eigvals_clipped)
+    # 6. Semi-axes radii r_i = sqrt(chi2 * lambda_i)
+    radii = np.sqrt(eigvals_clipped * chi2_val)
 
     volume = float((4.0 / 3.0) * math.pi * np.prod(radii))
     mu = np.zeros(3, dtype=np.float64) if center is None else np.asarray(center, dtype=np.float64)
@@ -185,8 +213,8 @@ def compute_uncertainty_ellipsoid_3d(
         radii=radii,
         axes=eigvecs,
         volume=volume,
-        cov=cov_reg,
-        inv_cov=inv_cov,
+        cov=cov_psd,
+        inv_cov=inv_cov_psd,
         chi2_val=chi2_val,
     )
 
@@ -211,32 +239,32 @@ def project_cuboid_to_camera_bbox(
     # Transform to camera frame: X_cam = R_cam * X_world + t_cam
     cam_pts = (world_verts @ cam_model.R_cam.T) + cam_model.t_cam.reshape(1, 3)
 
-    # Reject if cuboid is behind the camera sensor plane
-    if np.any(cam_pts[:, 2] <= min_z_cam):
-        # Check if entire cuboid is behind camera
-        if np.all(cam_pts[:, 2] <= min_z_cam):
-            return None
-        # If partially clipped, ensure center is ahead
+    # Check visibility: reject if center or too many vertices are behind near sensor plane
+    visible_mask = cam_pts[:, 2] > min_z_cam
+    if not np.all(visible_mask):
         centroid = cuboid.get_centroid()
         center_cam = cam_model.R_cam @ centroid + cam_model.t_cam
-        if center_cam[2] <= min_z_cam:
+        if center_cam[2] <= min_z_cam or np.count_nonzero(visible_mask) < 4:
             return None
 
-    # Project 3D points via camera intrinsics
-    # Homogeneous coordinates: uv_h = K * pt_cam
+    # Project only valid points in front of near plane to prevent 1/depth explosion
     uv_h = cam_pts @ cam_model.K.T
-    depths = np.maximum(uv_h[:, 2:], 1e-6)
-    pts_2d = uv_h[:, :2] / depths  # (8, 2)
+    pts_2d = np.full((8, 2), np.nan, dtype=np.float64)
+    for i in range(8):
+        if visible_mask[i]:
+            z = uv_h[i, 2]
+            pts_2d[i, 0] = uv_h[i, 0] / z
+            pts_2d[i, 1] = uv_h[i, 1] / z
 
-    # Check for NaN / Inf
-    if np.isnan(pts_2d).any() or np.isinf(pts_2d).any():
+    valid_pts = pts_2d[visible_mask]
+    if len(valid_pts) == 0 or np.isnan(valid_pts).any() or np.isinf(valid_pts).any():
         return None
 
-    # Compute circumscribed 2D bounding box clamped to image borders
-    x_min = float(np.clip(np.min(pts_2d[:, 0]), 0, img_w - 1))
-    y_min = float(np.clip(np.min(pts_2d[:, 1]), 0, img_h - 1))
-    x_max = float(np.clip(np.max(pts_2d[:, 0]), 0, img_w - 1))
-    y_max = float(np.clip(np.max(pts_2d[:, 1]), 0, img_h - 1))
+    # Compute circumscribed 2D bounding box from visible vertices clamped to image borders
+    x_min = float(np.clip(np.min(valid_pts[:, 0]), 0, img_w - 1))
+    y_min = float(np.clip(np.min(valid_pts[:, 1]), 0, img_h - 1))
+    x_max = float(np.clip(np.max(valid_pts[:, 0]), 0, img_w - 1))
+    y_max = float(np.clip(np.max(valid_pts[:, 1]), 0, img_h - 1))
 
     # Reject degenerate boxes
     if (x_max - x_min) < 1.0 or (y_max - y_min) < 1.0:
@@ -274,15 +302,25 @@ def draw_cuboid_wireframe_hud(
 
     bbox_2d, pts_2d, edges_2d = proj
 
-    # 1. Fill front cabin face with translucent overlay
+    # 1. Fill front cabin face with translucent overlay (bounded ROI blending)
     front_indices = cuboid.get_front_face_indices()
-    front_pts = np.asarray([pts_2d[i] for i in front_indices], dtype=np.int32).reshape((-1, 1, 2))
-    overlay = frame.copy()
-    cv2.fillPoly(overlay, [front_pts], front_face_color)
-    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+    if all(not np.isnan(pts_2d[i]).any() for i in front_indices):
+        front_pts = np.asarray([pts_2d[i] for i in front_indices], dtype=np.int32).reshape((-1, 1, 2))
+        fx1 = max(0, int(np.min(front_pts[:, 0, 0])))
+        fy1 = max(0, int(np.min(front_pts[:, 0, 1])))
+        fx2 = min(frame.shape[1], int(np.max(front_pts[:, 0, 0])) + 1)
+        fy2 = min(frame.shape[0], int(np.max(front_pts[:, 0, 1])) + 1)
+        if fx2 > fx1 and fy2 > fy1:
+            roi = frame[fy1:fy2, fx1:fx2]
+            roi_overlay = roi.copy()
+            pts_roi = front_pts - np.array([[[fx1, fy1]]], dtype=np.int32)
+            cv2.fillPoly(roi_overlay, [pts_roi], front_face_color)
+            cv2.addWeighted(roi_overlay, 0.35, roi, 0.65, 0, roi)
 
-    # 2. Draw 12 wireframe edges
+    # 2. Draw wireframe edges
     for p1, p2 in edges_2d:
+        if math.isnan(p1[0]) or math.isnan(p1[1]) or math.isnan(p2[0]) or math.isnan(p2[1]):
+            continue
         pt1 = (int(round(p1[0])), int(round(p1[1])))
         pt2 = (int(round(p2[0])), int(round(p2[1])))
         cv2.line(frame, pt1, pt2, edge_color, thickness, lineType=cv2.LINE_AA)
@@ -290,7 +328,8 @@ def draw_cuboid_wireframe_hud(
     # 3. Draw vertices
     if draw_vertices:
         for p in pts_2d:
-            cv2.circle(frame, (int(round(p[0])), int(round(p[1]))), 3, (255, 255, 255), -1, lineType=cv2.LINE_AA)
+            if not np.isnan(p).any():
+                cv2.circle(frame, (int(round(p[0])), int(round(p[1]))), 3, (255, 255, 255), -1, lineType=cv2.LINE_AA)
 
     return True
 

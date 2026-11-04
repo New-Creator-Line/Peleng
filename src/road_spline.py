@@ -24,7 +24,9 @@ class RoadSplineConstraint:
         self.tree: Optional[cKDTree] = None
         self.is_fitted = False
 
-    def fit_from_points(self, points: np.ndarray, smoothing: float = 0.0, step: int = 15) -> "RoadSplineConstraint":
+    def fit_from_points(
+        self, points: np.ndarray, smoothing: float = 0.0, step: int = 15
+    ) -> "RoadSplineConstraint":
         """
         Fits a 3D parametric cubic B-spline through spatial anchor points.
         """
@@ -56,7 +58,7 @@ class RoadSplineConstraint:
         Projects a single 3D point orthogonally to the nearest point on the road spline.
         Returns: (projected_point_3d, distance_to_centerline)
         """
-        if not self.is_fitted or self.tree is None:
+        if not self.is_fitted or self.tree is None or self.road_dense is None:
             return pt_3d, 0.0
 
         pt = np.asarray(pt_3d, dtype=np.float64).reshape(1, 3)
@@ -75,11 +77,11 @@ class RoadSplineConstraint:
         - In occluded frames: strong projection to road centerline (kills lateral tree drift).
         - In clear frames: soft regularization towards road centerline.
         """
-        if not self.is_fitted or self.tree is None:
+        if not self.is_fitted or self.tree is None or self.road_dense is None:
             return trajectory
 
         pts = np.asarray(trajectory, dtype=np.float64).copy()
-        dists, indices = self.tree.query(pts)
+        _, indices = self.tree.query(pts)
         road_nearest = self.road_dense[indices]
 
         if occluded_mask is None:
@@ -95,20 +97,18 @@ class RoadSplineConstraint:
         if not self.is_fitted or self.road_dense is None:
             return
         os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-        # Downsample to 200 anchors for compact config
         anchors = self.road_dense[::100].tolist()
         data = {"road_anchors": anchors}
-        with open(filepath, "w") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
     def load(self, filepath: str) -> "RoadSplineConstraint":
         """Loads road anchors from JSON config."""
         if not os.path.exists(filepath):
             return self
-        with open(filepath, "r") as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
         anchors = np.array(data.get("road_anchors", []), dtype=np.float64)
         if len(anchors) >= 4:
             self.fit_from_points(anchors, smoothing=0.0, step=1)
         return self
-

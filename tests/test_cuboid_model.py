@@ -14,7 +14,7 @@ from src.cuboid_model import (
 
 
 def test_cuboid_vertices_zero_rotation():
-    """Verify 8 vertices generated with zero yaw rotation around bottom base center."""
+    """Verify 8 vertices generated with zero yaw rotation around cabin tracking pivot."""
     cuboid = TruckCuboid3D(
         x=1000.0, y=500.0, z=50.0,
         yaw=0.0,
@@ -24,23 +24,24 @@ def test_cuboid_vertices_zero_rotation():
     assert verts.shape == (8, 3)
 
     # In UE5: X is forward (length), Y is right (width), Z is up (height)
-    # At yaw=0, X ranges from 1000 - 300 to 1000 + 300 -> [700, 1300]
+    # With cabin pivot (d_front=150.0), at yaw=0:
+    # X ranges from 1000 + (150 - 600) to 1000 + 150 -> [550, 1150]
     # Y ranges from 500 - 100 to 500 + 100 -> [400, 600]
     # Z ranges from 50 to 50 + 200 -> [50, 250]
-    assert np.isclose(np.min(verts[:, 0]), 700.0)
-    assert np.isclose(np.max(verts[:, 0]), 1300.0)
+    assert np.isclose(np.min(verts[:, 0]), 550.0)
+    assert np.isclose(np.max(verts[:, 0]), 1150.0)
     assert np.isclose(np.min(verts[:, 1]), 400.0)
     assert np.isclose(np.max(verts[:, 1]), 600.0)
     assert np.isclose(np.min(verts[:, 2]), 50.0)
     assert np.isclose(np.max(verts[:, 2]), 250.0)
 
-    # Check centroid
+    # Check centroid (shifted -150 cm along X from cabin pivot for L=600, d_front=150)
     centroid = cuboid.get_centroid()
-    assert np.allclose(centroid, np.array([1000.0, 500.0, 150.0]))
+    assert np.allclose(centroid, np.array([850.0, 500.0, 150.0]))
 
 
 def test_cuboid_vertices_yaw_90_deg():
-    """Verify 90-degree yaw rotation (+pi/2 around Z-axis)."""
+    """Verify 90-degree yaw rotation (+pi/2 around Z-axis) with cabin pivot."""
     # 90 deg rotation swaps X and Y in world
     cuboid = TruckCuboid3D(
         x=0.0, y=0.0, z=0.0,
@@ -49,28 +50,30 @@ def test_cuboid_vertices_yaw_90_deg():
     )
     verts = cuboid.get_world_vertices()
 
-    # Length (600) was along X, now rotated +90 deg -> along +Y (from -300 to +300 on Y)
+    # Length (600, [-450, +150]) was along X, now rotated +90 deg -> along +Y (from -450 to +150 on Y)
     # Width (200) was along Y, now rotated +90 deg -> along -X (from -100 to +100 on X)
     assert np.isclose(np.min(verts[:, 0]), -100.0)
     assert np.isclose(np.max(verts[:, 0]), 100.0)
-    assert np.isclose(np.min(verts[:, 1]), -300.0)
-    assert np.isclose(np.max(verts[:, 1]), 300.0)
+    assert np.isclose(np.min(verts[:, 1]), -450.0)
+    assert np.isclose(np.max(verts[:, 1]), 150.0)
     assert np.isclose(np.min(verts[:, 2]), 0.0)
     assert np.isclose(np.max(verts[:, 2]), 100.0)
 
 
 def test_cuboid_edges_and_front_face():
     """Verify 12 bounding box edges and front cabin indicators."""
-    cuboid = TruckCuboid3D(0.0, 0.0, 0.0, 0.0, 600.0, 200.0, 200.0)
+    cuboid = TruckCuboid3D(0.0, 0.0, 0.0, 0.0, 950.0, 200.0, 200.0)
     edges = cuboid.get_edges()
     assert len(edges) == 12
 
     front_face_indices = cuboid.get_front_face_indices()
     assert len(front_face_indices) == 4
 
-    front_verts = cuboid.get_world_vertices()[front_face_indices]
-    # At yaw=0, front face is at max X (+300.0)
-    assert np.allclose(front_verts[:, 0], 300.0)
+    world_verts = cuboid.get_world_vertices()
+    front_verts = world_verts[front_face_indices]
+    # At yaw=0 with d_front=150.0 and L=950.0, front face is at +150.0 and rear is at -800.0
+    assert np.allclose(front_verts[:, 0], 150.0)
+    assert np.isclose(np.min(world_verts[:, 0]), -800.0)
 
 
 def test_uncertainty_ellipsoid_isotropic():

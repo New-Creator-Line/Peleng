@@ -42,8 +42,8 @@ def get_ue_camera_rotation_matrix(roll_deg: float, pitch_deg: float, yaw_deg: fl
     sr, cr = math.sin(r), math.cos(r)
 
     forward = np.array([cp * cy, cp * sy, sp], dtype=np.float64)
-    right   = np.array([sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp], dtype=np.float64)
-    up      = np.array([-(cr * sp * cy + sr * sy), -(cr * sp * sy - sr * cy), cr * cp], dtype=np.float64)
+    right = np.array([sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp], dtype=np.float64)
+    up = np.array([-(cr * sp * cy + sr * sy), -(cr * sp * sy - sr * cy), cr * cp], dtype=np.float64)
 
     R_cam = np.vstack([right, -up, forward])
     return R_cam
@@ -78,11 +78,14 @@ class CameraModel:
         cx = self.image_width_px / 2.0
         cy = self.image_height_px / 2.0
 
-        self.K = np.array([
-            [fx,  0.0, cx ],
-            [0.0, fy,  cy ],
-            [0.0, 0.0, 1.0]
-        ], dtype=np.float64)
+        self.K = np.array(
+            [
+                [fx, 0.0, cx],
+                [0.0, fy, cy],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
 
         self.R_cam = get_ue_camera_rotation_matrix(self.rot[0], self.rot[1], self.rot[2])
         self.t_cam = -self.R_cam @ self.loc
@@ -136,6 +139,7 @@ class CameraModel:
 
 class CameraTimeline:
     """Manages camera calibration parameters over all video frames."""
+
     def __init__(self, cam_id: int) -> None:
         self.cam_id = cam_id
         self.frames: Dict[int, CameraModel] = {}
@@ -155,14 +159,12 @@ class CameraTimeline:
 
 
 def _parse_float(val: object) -> float:
-    return float(str(val).strip().replace(',', '.'))
+    return float(str(val).strip().replace(",", "."))
 
 
 def _extract_optics_from_csv(df: pd.DataFrame) -> Tuple[float, float, float]:
     """
     Extracts focal_length_mm and sensor dimensions (sw, sh) from the camera CSV header/first row.
-    Header format: Frame;Loc_X;Loc_Y;Loc_Z;Rot_Roll;Rot_Pitch;Rot_Yaw;;;Focal length;60
-    First row format: ...;;;Размеры матрицы;23,76*13,365
     """
     focal_length = 35.0
     sw, sh = 23.76, 13.365
@@ -174,7 +176,6 @@ def _extract_optics_from_csv(df: pd.DataFrame) -> Tuple[float, float, float]:
                 focal_length = _parse_float(cols[idx + 1])
             except ValueError:
                 pass
-            # Check first row of that same column for sensor dimensions "23,76*13,365"
             if not df.empty:
                 raw_sensor = str(df.iloc[0, idx + 1]).strip()
                 sensor_match = re.search(r"(\d+[.,]?\d*)\s*\*\s*(\d+[.,]?\d*)", raw_sensor)
@@ -191,7 +192,7 @@ def _extract_optics_from_csv(df: pd.DataFrame) -> Tuple[float, float, float]:
 
 def load_camera_csv(csv_path: str, cam_id: int) -> CameraTimeline:
     timeline = CameraTimeline(cam_id)
-    df = pd.read_csv(csv_path, sep=';', encoding='cp1251')
+    df = pd.read_csv(csv_path, sep=";", encoding="cp1251")
 
     focal_length, sw, sh = _extract_optics_from_csv(df)
 
@@ -200,17 +201,21 @@ def load_camera_csv(csv_path: str, cam_id: int) -> CameraTimeline:
 
     for _, row in df.iterrows():
         try:
-            frame_idx = int(_parse_float(row['Frame']))
-            loc = np.array([
-                _parse_float(row['Loc_X']),
-                _parse_float(row['Loc_Y']),
-                _parse_float(row['Loc_Z']),
-            ])
-            rot = np.array([
-                _parse_float(row['Rot_Roll']),
-                _parse_float(row['Rot_Pitch']),
-                _parse_float(row['Rot_Yaw']),
-            ])
+            frame_idx = int(_parse_float(row["Frame"]))
+            loc = np.array(
+                [
+                    _parse_float(row["Loc_X"]),
+                    _parse_float(row["Loc_Y"]),
+                    _parse_float(row["Loc_Z"]),
+                ]
+            )
+            rot = np.array(
+                [
+                    _parse_float(row["Rot_Roll"]),
+                    _parse_float(row["Rot_Pitch"]),
+                    _parse_float(row["Rot_Yaw"]),
+                ]
+            )
 
             model = CameraModel(
                 cam_id=cam_id,

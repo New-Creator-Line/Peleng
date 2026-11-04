@@ -67,3 +67,17 @@ def test_cpp_speed_benchmark():
     fps = 1000.0 / elapsed
     print(f"\n[C++ Triangulation Benchmark] 1000 solves in {elapsed*1000:.2f} ms ({fps:.0f} FPS)")
     assert fps > 1000.0
+
+
+def test_cpp_nvdec_capabilities():
+    """Verify NVIDIA Video Codec SDK 13.1.24 NVDEC query binding in peleng_core."""
+    assert hasattr(peleng_core, "query_nvdec_capabilities")
+    caps = peleng_core.query_nvdec_capabilities()
+    assert isinstance(caps, dict)
+    assert "sdk_linked" in caps
+    assert "h264_supported" in caps
+    if caps["sdk_linked"] and caps["h264_supported"]:
+        assert caps["num_nvdec_engines"] >= 1
+        assert caps["max_width"] >= 1920
+        assert caps["max_height"] >= 1080
+

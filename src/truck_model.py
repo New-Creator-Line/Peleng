@@ -42,21 +42,27 @@ class TruckModel:
         """8 corners (8, 3) of the oriented box with given center and yaw (rad)."""
         c, s = np.cos(yaw), np.sin(yaw)
         hl, hw, hh = self.length / 2.0, self.width / 2.0, self.height / 2.0
-        local = np.array([[a, b, h] for a in (-hl, hl) for b in (-hw, hw) for h in (-hh, hh)],
-                         dtype=np.float64)
+        local = np.array(
+            [[a, b, h] for a in (-hl, hl) for b in (-hw, hw) for h in (-hh, hh)],
+            dtype=np.float64,
+        )
         R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
         return np.asarray(center, dtype=np.float64) + local @ R.T
 
     def pivot_from_center(self, center: np.ndarray, heading_yaw: float) -> np.ndarray:
         """Converts box center -> actor pivot (cabin) for a truck facing ``heading_yaw``."""
-        return (np.asarray(center, dtype=np.float64)
-                - self.center_forward * self.heading_vector(heading_yaw)
-                - np.array([0.0, 0.0, self.center_up]))
+        return (
+            np.asarray(center, dtype=np.float64)
+            - self.center_forward * self.heading_vector(heading_yaw)
+            - np.array([0.0, 0.0, self.center_up])
+        )
 
     def center_from_pivot(self, pivot: np.ndarray, heading_yaw: float) -> np.ndarray:
-        return (np.asarray(pivot, dtype=np.float64)
-                + self.center_forward * self.heading_vector(heading_yaw)
-                + np.array([0.0, 0.0, self.center_up]))
+        return (
+            np.asarray(pivot, dtype=np.float64)
+            + self.center_forward * self.heading_vector(heading_yaw)
+            + np.array([0.0, 0.0, self.center_up])
+        )
 
     # ------------------------------------------------------------------ I/O
     def save(self, path: str = DEFAULT_TRUCK_MODEL_PATH) -> None:
@@ -72,4 +78,3 @@ class TruckModel:
             known = {k: data[k] for k in cls.__dataclass_fields__ if k in data}
             return cls(**known)
         return cls()
-

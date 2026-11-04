@@ -4,13 +4,6 @@ Multi-view oriented-box fitting.
 For every frame we search the box pose (center X, Y, Z and yaw) of a truck with known
 dimensions such that the 2D extents of its projected 3D box match the detected bounding
 boxes in all cameras simultaneously (robust non-linear least squares).
-
-Compared with triangulating bounding-box centers this
-  * uses all 4 box edges of every camera (more constraints, better depth),
-  * handles perspective correctly (projection of the 3D center != 2D box center),
-  * works with a single camera (known object size gives the distance),
-  * ignores box edges cut by the image border (truncated detections),
-  * down-weights edges damaged by partial occlusion (soft-L1 loss).
 """
 
 from dataclasses import dataclass
@@ -36,12 +29,14 @@ class BoxObservation:
     def edge_mask(self) -> np.ndarray:
         """Edges touching the image border are truncated -> unreliable."""
         x1, y1, x2, y2 = self.box
-        return np.array([
-            x1 > self.border_px,
-            y1 > self.border_px,
-            x2 < self.image_w - self.border_px,
-            y2 < self.image_h - self.border_px,
-        ])
+        return np.array(
+            [
+                x1 > self.border_px,
+                y1 > self.border_px,
+                x2 < self.image_w - self.border_px,
+                y2 < self.image_h - self.border_px,
+            ]
+        )
 
 
 @dataclass
@@ -86,7 +81,6 @@ class MultiViewBoxFitter:
         self.relative_sigma = float(relative_sigma)
         self.robust_scale = float(robust_scale)
 
-    # ------------------------------------------------------------------ residuals
     def _edge_sigma(self, obs: BoxObservation) -> float:
         size = max(obs.box[2] - obs.box[0], obs.box[3] - obs.box[1])
         return float(np.hypot(self.pixel_sigma, self.relative_sigma * size))
@@ -116,7 +110,6 @@ class MultiViewBoxFitter:
             res.extend(dp.tolist())
         return np.asarray(res, dtype=np.float64)
 
-    # ------------------------------------------------------------------ fitting
     def fit(
         self,
         observations: Sequence[BoxObservation],
@@ -138,8 +131,11 @@ class MultiViewBoxFitter:
             x0 = np.array([*np.asarray(init_center, dtype=np.float64), y0])
             try:
                 sol = least_squares(
-                    self._residuals, x0, args=(observations, prior),
-                    loss="soft_l1", f_scale=self.robust_scale,
+                    self._residuals,
+                    x0,
+                    args=(observations, prior),
+                    loss="soft_l1",
+                    f_scale=self.robust_scale,
                     x_scale=np.array([200.0, 200.0, 50.0, 0.2]),
                     max_nfev=60,
                 )
@@ -151,7 +147,6 @@ class MultiViewBoxFitter:
             return None
 
         theta = best.x
-        # Covariance from the Gauss-Newton approximation (residuals already in sigma units)
         J = best.jac
         try:
             cov = np.linalg.inv(J.T @ J + 1e-9 * np.eye(4))
@@ -175,7 +170,6 @@ class MultiViewBoxFitter:
             n_edges=n_edges,
         )
 
-    # ------------------------------------------------------------------ association
     def predicted_extents(
         self, models: Dict[int, CameraModel], center: np.ndarray, yaw: float
     ) -> Dict[int, Optional[np.ndarray]]:

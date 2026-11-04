@@ -1,6 +1,9 @@
 from typing import Optional
 import numpy as np
 
+from src.tracker_ukf import UKF10DTracker
+from src.rts_smoother import RTSSmoother10D
+
 try:
     import peleng_core
     HAS_CPP_CORE = True
@@ -106,19 +109,10 @@ class KalmanFilter3D:
         return self.x[3:].copy()
 
 
-
 class ConstantVelocityKF:
     """
     N-dimensional constant-velocity Kalman filter with physical noise units and an
     offline Rauch-Tung-Striebel (RTS) smoother.
-
-    State: [p_1..p_N, v_1..v_N]. Process noise: white acceleration with std
-    ``accel_std`` (units/s^2). Measurement covariance is supplied per update, so the
-    uncertainty of each measurement (e.g. from the multi-view box fit) is respected.
-
-    ``predict``/``update`` give the causal (real-time) estimate. After the sequence is
-    processed, ``smooth()`` returns the RTS-smoothed states which remove the lag of the
-    forward filter (offline mode).
     """
 
     def __init__(self, dim: int, dt: float, accel_std) -> None:
@@ -139,7 +133,7 @@ class ConstantVelocityKF:
         self.x = np.zeros(2 * n)
         self.P = np.eye(2 * n)
         self.is_initialized = False
-        self._hist: list = []  # (x_pred, P_pred, x_filt, P_filt)
+        self._hist: list = []
 
     def initialize(self, pos, pos_cov, vel=None, vel_std=None) -> None:
         n = self.dim
@@ -175,18 +169,15 @@ class ConstantVelocityKF:
         return float(y @ np.linalg.solve(S, y))
 
     def step(self, z=None, R=None) -> np.ndarray:
-        """predict + optional update, recording history for the RTS smoother."""
         self.begin_step()
         return self.end_step(z, R)
 
     def begin_step(self) -> np.ndarray:
-        """Prediction half of a step (call ``end_step`` afterwards)."""
         pos = self.predict()
         self._pending = (self.x.copy(), self.P.copy())
         return pos
 
     def end_step(self, z=None, R=None) -> np.ndarray:
-        """Optional measurement update; records the step for the RTS smoother."""
         x_pred, P_pred = self._pending
         if z is not None:
             self.update(z, R)
@@ -194,7 +185,6 @@ class ConstantVelocityKF:
         return self.x[: self.dim].copy()
 
     def smooth(self) -> np.ndarray:
-        """RTS smoother over the recorded history. Returns smoothed states (T, 2N)."""
         T = len(self._hist)
         if T == 0:
             return np.zeros((0, 2 * self.dim))
@@ -209,3 +199,4 @@ class ConstantVelocityKF:
 
     def filtered_states(self) -> np.ndarray:
         return np.array([h[2] for h in self._hist])
+

@@ -1,20 +1,8 @@
 """
 Truck tracker based on multi-view oriented-box fitting.
-
-Pipeline per frame:
-  1. associate detections of every camera with the predicted 3D box (IoU gating),
-  2. fit the 3D box pose (center + yaw) to all associated 2D boxes (``MultiViewBoxFitter``),
-  3. update a constant-velocity Kalman filter of the box center (measurement covariance
-     comes from the fit) and a separate filter of the yaw,
-  4. convert box center -> actor pivot (cabin) using the truck model and heading.
-
-Outputs both a causal (real-time) estimate and an RTS-smoothed (offline) estimate.
-Works with any number of cameras; a frame with a single visible camera is still
-measured (the known truck size gives the depth); frames with no detections are
-bridged by the motion model, so a coordinate is produced for every frame.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -33,17 +21,17 @@ class BoxTrackerConfig:
     conf_threshold: float = 0.3
     image_w: int = 1920
     image_h: int = 1080
-    accel_std_xy: float = 600.0       # units/s^2
+    accel_std_xy: float = 600.0
     accel_std_z: float = 150.0
-    yaw_accel_std: float = 1.5        # rad/s^2
-    min_pos_meas_std: float = 15.0    # floor of the measurement std (units)
-    min_yaw_meas_std: float = 0.03    # rad
-    prior_inflation: float = 3.0      # prior std = inflation * predicted std
-    max_rms_px: float = 45.0          # reject fits with larger edge RMS
-    gate_chi2: float = 40.0           # Mahalanobis gate for the position update
+    yaw_accel_std: float = 1.5
+    min_pos_meas_std: float = 15.0
+    min_yaw_meas_std: float = 0.03
+    prior_inflation: float = 3.0
+    max_rms_px: float = 45.0
+    gate_chi2: float = 40.0
     assoc_min_iou: float = 0.05
     init_max_rms_px: float = 30.0
-    min_speed_for_heading: float = 150.0  # units/s
+    min_speed_for_heading: float = 150.0
 
 
 @dataclass
@@ -56,8 +44,15 @@ class TrackStats:
 
 
 def _det_box(o: Dict[str, float]) -> np.ndarray:
-    return np.array([o["u"] - o["w"] / 2.0, o["v"] - o["h"] / 2.0,
-                     o["u"] + o["w"] / 2.0, o["v"] + o["h"] / 2.0], dtype=np.float64)
+    return np.array(
+        [
+            o["u"] - o["w"] / 2.0,
+            o["v"] - o["h"] / 2.0,
+            o["u"] + o["w"] / 2.0,
+            o["v"] + o["h"] / 2.0,
+        ],
+        dtype=np.float64,
+    )
 
 
 class BoxTruckTracker:
@@ -79,7 +74,6 @@ class BoxTruckTracker:
         self._heading_sign = 1.0
         self._frames: List[int] = []
 
-    # ------------------------------------------------------------------ helpers
     def _make_obs(self, frame: int, o: Dict[str, float]) -> BoxObservation:
         return BoxObservation(
             cam_id=int(o["cam_id"]),
@@ -116,7 +110,6 @@ class BoxTruckTracker:
         return obs
 
     def _try_initialize(self, frame: int, by_cam) -> Optional[Tuple[np.ndarray, float, object]]:
-        """Needs >= 2 cameras: triangulate box centers, then fit the box with several yaws."""
         cam_ids = list(by_cam.keys())
         if len(cam_ids) < 2:
             return None
@@ -126,14 +119,13 @@ class BoxTruckTracker:
                 o1, o2 = by_cam[cam_ids[i]][0], by_cam[cam_ids[j]][0]
                 P1 = self.cameras[cam_ids[i]].get_model(frame).get_projection_matrix()
                 P2 = self.cameras[cam_ids[j]].get_model(frame).get_projection_matrix()
-                pt, err = self.triangulator.triangulate([P1, P2], [(o1["u"], o1["v"]), (o2["u"], o2["v"])])
+                pt, _ = self.triangulator.triangulate([P1, P2], [(o1["u"], o1["v"]), (o2["u"], o2["v"])])
                 if pt is None:
                     continue
                 obs = [self._make_obs(frame, by_cam[c][0]) for c in cam_ids]
                 res = self.fitter.fit(obs, pt, 0.0, yaw_candidates=np.linspace(0, np.pi, 6, endpoint=False))
                 if res is None:
                     continue
-                # keep only cameras consistent with this hypothesis and refit
                 consistent = self._associate(frame, by_cam, res.center, res.yaw)
                 if len(consistent) >= 2:
                     res2 = self.fitter.fit(consistent, res.center, res.yaw)
@@ -145,7 +137,6 @@ class BoxTruckTracker:
             return None
         return best.center, best.yaw, best
 
-    # ------------------------------------------------------------------ main loop
     def run(self, grouped_detections: Dict[int, List[Dict[str, float]]], n_frames: int) -> pd.DataFrame:
         c = self.cfg
         rows = []
@@ -158,10 +149,18 @@ class BoxTruckTracker:
                     rows.append({"Frame": frame, "status": "none", "n_cams": 0, "rms_px": np.nan})
                     continue
                 center, yaw, res = init
-                self.kf_pos.initialize(center, res.cov_pos + np.eye(3) * c.min_pos_meas_std ** 2,
-                                       vel=np.zeros(3), vel_std=[1500.0, 1500.0, 200.0])
-                self.kf_yaw.initialize([yaw], [[res.yaw_std ** 2 + c.min_yaw_meas_std ** 2]],
-                                       vel=[0.0], vel_std=0.5)
+                self.kf_pos.initialize(
+                    center,
+                    res.cov_pos + np.eye(3) * c.min_pos_meas_std ** 2,
+                    vel=np.zeros(3),
+                    vel_std=[1500.0, 1500.0, 200.0],
+                )
+                self.kf_yaw.initialize(
+                    [yaw],
+                    [[res.yaw_std ** 2 + c.min_yaw_meas_std ** 2]],
+                    vel=[0.0],
+                    vel_std=0.5,
+                )
                 self.stats.first_frame = frame
                 self.stats.measured_multi += 1
                 self._frames.append(frame)
@@ -177,17 +176,18 @@ class BoxTruckTracker:
             status, n_cams, rms = "predicted", 0, np.nan
             z_pos = R_pos = z_yaw = R_yaw = None
             if obs:
-                prior_std = np.concatenate([
-                    np.maximum(np.sqrt(np.diag(P_pos)) * c.prior_inflation, 30.0),
-                    [max(np.sqrt(P_yaw) * c.prior_inflation, 0.05)],
-                ])
+                prior_std = np.concatenate(
+                    [
+                        np.maximum(np.sqrt(np.diag(P_pos)) * c.prior_inflation, 30.0),
+                        [max(np.sqrt(P_yaw) * c.prior_inflation, 0.05)],
+                    ]
+                )
                 prior = (np.array([*c_pred, y_pred]), prior_std)
                 res = self.fitter.fit(obs, c_pred, y_pred, prior=prior)
                 if res is not None and res.rms_px <= c.max_rms_px:
                     R = res.cov_pos + np.eye(3) * c.min_pos_meas_std ** 2
                     if self.kf_pos.innovation_mahalanobis(res.center, R) <= c.gate_chi2:
                         z_pos, R_pos = res.center, R
-                        # align yaw (defined modulo pi) with the prediction
                         dy = np.angle(np.exp(1j * 2.0 * (res.yaw - y_pred))) / 2.0
                         z_yaw = np.array([y_pred + dy])
                         R_yaw = np.array([[res.yaw_std ** 2 + c.min_yaw_meas_std ** 2]])
@@ -212,12 +212,9 @@ class BoxTruckTracker:
         diag = pd.DataFrame(rows)
         return self._finalize(diag, n_frames)
 
-    # ------------------------------------------------------------------ outputs
     def _pivots(self, pos_states: np.ndarray, yaw_states: np.ndarray) -> np.ndarray:
-        """Box center states -> pivot positions, resolving the heading sign from motion."""
         out = np.zeros((len(pos_states), 3))
         sign = 1.0
-        # initial sign: first frame with significant speed
         for k in range(len(pos_states)):
             v = pos_states[k, 3:5]
             if np.linalg.norm(v) > self.cfg.min_speed_for_heading:
@@ -248,7 +245,5 @@ class BoxTruckTracker:
         tmp = pd.DataFrame(np.hstack([online, offline]), columns=cols)
         tmp["Frame"] = frames
         out = out.merge(tmp, on="Frame", how="left")
-        # Frames before the first fix: back-fill so that every frame has a coordinate
         out[cols] = out[cols].bfill().ffill()
         return out.merge(diag, on="Frame", how="left")
-

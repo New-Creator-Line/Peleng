@@ -54,6 +54,7 @@ def generate_mock_detections(
                     "w": round(box_w, 2),
                     "h": round(box_h, 2),
                     "conf": round(conf, 4),
+                    "is_truncated": False,
                 })
 
     df = pd.DataFrame(records)
@@ -65,7 +66,7 @@ def generate_mock_detections(
 def load_detections(detections_csv_path: str) -> Dict[int, List[Dict[str, float]]]:
     """
     Loads 2D detections and groups them by frame.
-    Returns: {frame_idx: [{'cam_id': int, 'u': float, 'v': float, 'w': float, 'h': float, 'conf': float}]}
+    Returns: {frame_idx: [{'cam_id': int, 'u': float, 'v': float, 'w': float, 'h': float, 'conf': float, 'is_truncated': bool}]}
     """
     try:
         df = pd.read_csv(detections_csv_path, sep=';')
@@ -79,6 +80,7 @@ def load_detections(detections_csv_path: str) -> Dict[int, List[Dict[str, float]
         frame_idx = int(row['Frame'])
         if frame_idx not in grouped:
             grouped[frame_idx] = []
+        is_trunc = bool(row['is_truncated']) if 'is_truncated' in row else False
         grouped[frame_idx].append({
             "cam_id": int(row['Cam_ID']),
             "u": float(row['u']),
@@ -86,6 +88,7 @@ def load_detections(detections_csv_path: str) -> Dict[int, List[Dict[str, float]
             "w": float(row['w']),
             "h": float(row['h']),
             "conf": float(row['conf']),
+            "is_truncated": is_trunc,
         })
 
     return grouped
