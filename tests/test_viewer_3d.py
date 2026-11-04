@@ -451,4 +451,142 @@ def test_export_3d_viewer_html_tree_cloud_variations_graceful(tmp_path):
     assert embedded_numpy["tree_cloud"]["colors_rgb"] == [[46, 125, 50]]
 
 
+def test_viewer_3d_census_stereo_controls_and_group(tmp_path):
+    """
+    Verifies that the 3D Viewer HTML contains Method 4 Census Transform Stereo controls:
+    1. Checkbox #toggle-method-census with 'checked' by default.
+    2. Label #label-method-census with '💎 Метод 4: Census Transform Stereo'.
+    3. Three.js layerGroupMethodCensus initialization and scene integration.
+    4. Integration with DEFAULT_SETTINGS, saveViewerSettings, and syncAllLayersAndControls.
+    5. Method 4 entry in the Legend.
+    """
+    payload = _make_mock_scene_payload(has_ground_truth=True)
+    out_file = tmp_path / "census_controls_viewer.html"
+    export_3d_viewer_html(payload, str(out_file))
+    html = out_file.read_text(encoding="utf-8")
+
+    # 1. UI Checkbox and Label
+    assert 'id="toggle-method-census"' in html
+    assert '<input type="checkbox" id="toggle-method-census" checked' in html
+    assert 'id="label-method-census"' in html
+    assert "💎 Метод 4: Census Transform Stereo (Хэмминг + Сектора)" in html
+    assert "Сравнение 4 методов рельефа" in html
+
+    # 2. Three.js client code
+    assert "layerGroupMethodCensus = new THREE.Group()" in html
+    assert "scene.add(layerGroupMethodCensus)" in html
+    assert "layerGroupMethodCensus.visible = Boolean(toggleCensus.checked)" in html
+    assert "PointsMaterial" in html
+
+    # 3. Settings persistence and initialization
+    assert "'toggle-method-census': true" in html
+    assert "'toggle-method-census'" in html
+
+    # 4. Legend swatch
+    assert "Метод 4: Census Transform Stereo (Золото)" in html
+    assert "#fbbf24" in html
+
+
+def test_viewer_3d_payload_with_census_stereo_points(tmp_path):
+    """
+    Verifies that export_3d_viewer_html preserves and serializes Census Transform Stereo
+    point clouds, colors, runtime, and stats into window.SCENE_DATA.
+    """
+    payload = _make_mock_scene_payload(has_ground_truth=True)
+    payload["terrain_methods"] = {
+        "census_stereo": {
+            "vertices": [
+                [-12400.0, -4300.0, 412.0],
+                [-10200.0, -3100.0, 520.0],
+            ],
+            "colors": [
+                [251, 191, 36],
+                [245, 158, 11],
+            ],
+            "runtime_ms": 142.85,
+            "stats": {
+                "vertex_count": 2,
+                "face_count": 0,
+                "runtime_ms": 142.85,
+                "density": "dense_surface",
+            },
+        }
+    }
+
+    out_file = tmp_path / "census_payload_viewer.html"
+    export_3d_viewer_html(payload, str(out_file))
+    html = out_file.read_text(encoding="utf-8")
+
+    embedded = _extract_embedded_json(html)
+    assert "terrain_methods" in embedded
+    assert "census_stereo" in embedded["terrain_methods"]
+    cs = embedded["terrain_methods"]["census_stereo"]
+    assert len(cs["vertices"]) == 2
+    assert cs["vertices"][0] == [-12400.0, -4300.0, 412.0]
+    assert cs["colors"][0] == [251, 191, 36]
+    assert cs["runtime_ms"] == 142.85
+    assert cs["stats"]["vertex_count"] == 2
+
+
+def test_viewer_3d_census_stereo_numpy_arrays(tmp_path):
+    """
+    Verifies that NumPy arrays passed inside terrain_methods.census_stereo
+    are safely sanitized into JSON lists without raising TypeError.
+    """
+    payload = _make_mock_scene_payload(has_ground_truth=False)
+    payload["terrain_methods"] = {
+        "census_stereo": {
+            "vertices": np.array([[-15000.5, -5000.2, 450.0]], dtype=np.float64),
+            "colors": np.array([[251, 191, 36]], dtype=np.uint8),
+            "runtime_ms": np.float64(88.4),
+            "stats": {"vertex_count": np.int64(1)},
+        }
+    }
+
+    out_file = tmp_path / "census_numpy_viewer.html"
+    export_3d_viewer_html(payload, str(out_file))
+    html = out_file.read_text(encoding="utf-8")
+
+    embedded = _extract_embedded_json(html)
+    cs = embedded["terrain_methods"]["census_stereo"]
+    assert cs["vertices"] == [[-15000.5, -5000.2, 450.0]]
+    assert cs["colors"] == [[251, 191, 36]]
+    assert cs["runtime_ms"] == 88.4
+    assert cs["stats"]["vertex_count"] == 1
+
+
+def test_viewer_3d_census_stereo_missing_or_empty_graceful(tmp_path):
+    """
+    Verifies graceful fallback when terrain_methods or census_stereo is missing or empty.
+    """
+    # Empty terrain_methods
+    payload_empty = _make_mock_scene_payload(has_ground_truth=False)
+    payload_empty["terrain_methods"] = {}
+    out_empty = tmp_path / "census_empty.html"
+    export_3d_viewer_html(payload_empty, str(out_empty))
+    html_empty = out_empty.read_text(encoding="utf-8")
+    assert 'id="toggle-method-census"' in html_empty
+
+    # None terrain_methods
+    payload_none = _make_mock_scene_payload(has_ground_truth=False)
+    payload_none["terrain_methods"] = None
+    out_none = tmp_path / "census_none.html"
+    export_3d_viewer_html(payload_none, str(out_none))
+    html_none = out_none.read_text(encoding="utf-8")
+    assert 'id="toggle-method-census"' in html_none
+
+
+def test_terrain_builder_includes_census_stereo_method():
+    """
+    Verifies that src.terrain_builder defines and exports census_stereo within terrain_methods.
+    """
+    import src.terrain_builder as tb
+
+    assert hasattr(tb, "reconstruct_census_stereo")
+    assert hasattr(tb, "census_to_layer")
+    assert tb.reconstruct_census_stereo is not None
+    assert tb.census_to_layer is not None
+
+
+
 

@@ -43,6 +43,15 @@ except ImportError:
     reconstruct_metric_depth = None  # type: ignore
     metric_depth_to_layer = None  # type: ignore
 
+try:
+    from src.terrain.census_stereo import (
+        reconstruct_terrain as reconstruct_census_stereo,
+        to_scene_payload_layer as census_to_layer,
+    )
+except ImportError:
+    reconstruct_census_stereo = None  # type: ignore
+    census_to_layer = None  # type: ignore
+
 MODEL_ID = "depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf"
 FRUSTUM_DISTANCE_CM = 4000.0
 MAX_POINT_CLOUD_POINTS = 12000
@@ -890,7 +899,7 @@ def build_scene_3d_payload(
         "bounds_cm": bounds_cm,
     }
 
-    # Package visible terrain across 3 distinct reconstruction methods
+    # Package visible terrain across 4 distinct reconstruction methods
     terrain_methods: Dict[str, Any] = {}
     resolved_video_dir = calib_dir
 
@@ -974,6 +983,36 @@ def build_scene_3d_payload(
             }
     else:
         terrain_methods["metric_depth"] = {
+            "vertices": [],
+            "colors": [],
+            "runtime_ms": 0.0,
+            "stats": {"vertex_count": 0, "face_count": 0, "runtime_ms": 0.0},
+        }
+
+    # Method 4: Census Transform Stereo (Task 023)
+    if reconstruct_census_stereo is not None and census_to_layer is not None:
+        try:
+            p4 = reconstruct_census_stereo(
+                calib_dir=calib_dir,
+                video_dir=resolved_video_dir,
+                frame_idx=0,
+            )
+            l4 = census_to_layer(p4)
+            terrain_methods["census_stereo"] = {
+                "vertices": l4.get("point_cloud", {}).get("points_cm", []),
+                "colors": l4.get("point_cloud", {}).get("colors_rgb", []),
+                "runtime_ms": round(float(p4.get("stats", {}).get("runtime_ms", 0.0)), 2),
+                "stats": dict(p4.get("stats", {})),
+            }
+        except Exception as exc:
+            terrain_methods["census_stereo"] = {
+                "vertices": [],
+                "colors": [],
+                "runtime_ms": 0.0,
+                "stats": {"vertex_count": 0, "face_count": 0, "runtime_ms": 0.0, "error": str(exc)},
+            }
+    else:
+        terrain_methods["census_stereo"] = {
             "vertices": [],
             "colors": [],
             "runtime_ms": 0.0,

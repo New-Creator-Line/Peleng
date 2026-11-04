@@ -760,7 +760,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           </select>
         </div>
         <div style="margin-top: 10px; padding-top: 8px; border-top: 1px dashed rgba(56, 189, 248, 0.25);">
-          <div class="section-title" style="margin-bottom: 6px; color: #f8fafc; font-size: 10px;">Сравнение 3 методов рельефа</div>
+          <div class="section-title" style="margin-bottom: 6px; color: #f8fafc; font-size: 10px;">Сравнение 4 методов рельефа</div>
           <div class="layer-list" style="gap: 6px;">
             <label class="layer-item">
               <span id="label-method-epipolar" style="color:#00f5d4;font-weight:600;">🔵 Метод 1: Epipolar Stereo (Циан)</span>
@@ -773,6 +773,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
             <label class="layer-item">
               <span id="label-method-depth" style="color:#a855f7;font-weight:600;">🟣 Метод 3: Metric Depth Облако (Фиолетовый)</span>
               <input type="checkbox" id="toggle-method-depth" />
+            </label>
+            <label class="layer-item">
+              <span id="label-method-census" style="color:#fbbf24;font-weight:600;">💎 Метод 4: Census Transform Stereo (Хэмминг + Сектора)</span>
+              <input type="checkbox" id="toggle-method-census" checked />
             </label>
           </div>
         </div>
@@ -805,6 +809,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="legend-row">
           <span class="legend-swatch" style="background:#a855f7;"></span>
           <span>Метод 3: Metric Depth Облако (Фиолетовый)</span>
+        </div>
+        <div class="legend-row">
+          <span class="legend-swatch" style="background:#fbbf24;"></span>
+          <span>Метод 4: Census Transform Stereo (Золото)</span>
         </div>
       </div>
     </div>
@@ -1240,10 +1248,12 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
     buildPointCloud();
 
-    // 2b. Build 3 Visible-Scene Terrain Reconstruction Methods (Task 018)
+    // 2b. Build 4 Visible-Scene Terrain Reconstruction Methods (Task 018 & Task 023)
     let methodEpipolarObj = null;
     let methodCarvingObj = null;
     let methodDepthObj = null;
+    const layerGroupMethodCensus = new THREE.Group();
+    scene.add(layerGroupMethodCensus);
 
     function buildTerrainMethods() {
       const tm = SCENE_DATA.terrain_methods || {};
@@ -1361,6 +1371,66 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         if (lblDp) {
           const kStr = n3 >= 1000 ? `${Math.round(n3 / 1000)}k` : `${n3}`;
           lblDp.textContent = `🟣 Метод 3: Metric Depth Облако (${kStr} точек)`;
+        }
+      }
+
+      // Method 4: Census Transform Stereo Points (Gold/Amber #fbbf24, size 3.5px)
+      const dataCensus = tm.census_stereo || {};
+      const vertsCensus = dataCensus.vertices || [];
+      if (vertsCensus.length > 0) {
+        const n4 = vertsCensus.length;
+        const pos4 = new Float32Array(n4 * 3);
+        const col4 = new Float32Array(n4 * 3);
+        const inputColors4 = dataCensus.colors || [];
+        const hasCustomColors = Array.isArray(inputColors4) && inputColors4.length === n4;
+
+        for (let i = 0; i < n4; i++) {
+          const v3 = ueToThree(vertsCensus[i]);
+          pos4[i * 3] = v3.x;
+          pos4[i * 3 + 1] = v3.y + 0.14;
+          pos4[i * 3 + 2] = v3.z;
+
+          if (hasCustomColors && inputColors4[i]) {
+            const c = inputColors4[i];
+            const r = (c[0] > 1.0 ? c[0] / 255.0 : c[0]) || 0.984;
+            const g = (c[1] > 1.0 ? c[1] / 255.0 : c[1]) || 0.749;
+            const b = (c[2] > 1.0 ? c[2] / 255.0 : c[2]) || 0.141;
+            col4[i * 3] = r * 0.5 + 0.984 * 0.5;
+            col4[i * 3 + 1] = g * 0.5 + 0.749 * 0.5;
+            col4[i * 3 + 2] = b * 0.5 + 0.141 * 0.5;
+          } else {
+            // Gold #fbbf24 (r: 0.984, g: 0.749, b: 0.141)
+            col4[i * 3] = 0.984;
+            col4[i * 3 + 1] = 0.749;
+            col4[i * 3 + 2] = 0.141;
+          }
+        }
+        const geom4 = new THREE.BufferGeometry();
+        geom4.setAttribute('position', new THREE.BufferAttribute(pos4, 3));
+        geom4.setAttribute('color', new THREE.BufferAttribute(col4, 3));
+        const mat4 = new THREE.PointsMaterial({
+          size: 3.5,
+          vertexColors: true,
+          sizeAttenuation: true,
+          transparent: true,
+          opacity: 0.95
+        });
+        const pointsCensusObj = new THREE.Points(geom4, mat4);
+        layerGroupMethodCensus.add(pointsCensusObj);
+
+        const lblCensus = document.getElementById('label-method-census');
+        if (lblCensus) {
+          const kStr = n4 >= 1000 ? `${(n4 / 1000).toFixed(1)}k` : `${n4}`;
+          const rtVal = Number(dataCensus.runtime_ms || (dataCensus.stats ? dataCensus.stats.runtime_ms : 0) || 0);
+          const rtBadge = rtVal > 0 ? ` [${Math.round(rtVal)}ms]` : '';
+          lblCensus.innerHTML = `💎 Метод 4: Census Stereo <span style="font-size:10px;padding:1px 5px;border-radius:4px;background:rgba(251,191,36,0.2);border:1px solid rgba(251,191,36,0.4);margin-left:4px;">${kStr} pts${rtBadge}</span>`;
+        }
+      } else {
+        const lblCensus = document.getElementById('label-method-census');
+        if (lblCensus) {
+          const rtVal = Number(dataCensus.runtime_ms || (dataCensus.stats ? dataCensus.stats.runtime_ms : 0) || 0);
+          const rtBadge = rtVal > 0 ? ` [${Math.round(rtVal)}ms]` : '';
+          lblCensus.innerHTML = `💎 Метод 4: Census Transform Stereo (Хэмминг + Сектора)${rtBadge ? ` <span style="font-size:10px;padding:1px 5px;border-radius:4px;background:rgba(251,191,36,0.2);border:1px solid rgba(251,191,36,0.4);margin-left:4px;">${rtBadge}</span>` : ''}`;
         }
       }
     }
@@ -2251,7 +2321,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         'toggle-gt-traj': true,
         'toggle-method-epipolar': false,
         'toggle-method-carving': false,
-        'toggle-method-depth': false
+        'toggle-method-depth': false,
+        'toggle-method-census': true
       },
       sliders: {
         'slider-pt-size': 2.6,
@@ -2311,7 +2382,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           'toggle-gt-traj',
           'toggle-method-epipolar',
           'toggle-method-carving',
-          'toggle-method-depth'
+          'toggle-method-depth',
+          'toggle-method-census'
         ];
         layerIds.forEach(id => {
           const el = document.getElementById(id);
@@ -2439,6 +2511,12 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       if (methodDepthObj && toggleDepth) {
         methodDepthObj.visible = Boolean(toggleDepth.checked);
       }
+
+      // 15. Method 4: Census Transform Stereo (Gold)
+      const toggleCensus = document.getElementById('toggle-method-census');
+      if (layerGroupMethodCensus && toggleCensus) {
+        layerGroupMethodCensus.visible = Boolean(toggleCensus.checked);
+      }
     }
 
     function initViewerSettings() {
@@ -2508,7 +2586,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         'toggle-gt-traj',
         'toggle-method-epipolar',
         'toggle-method-carving',
-        'toggle-method-depth'
+        'toggle-method-depth',
+        'toggle-method-census'
       ];
       layerIds.forEach(id => {
         const el = document.getElementById(id);
