@@ -221,15 +221,22 @@ __marimo__/
 
 
 # Machine Learning weights, checkpoints and training runs
-*.pt
 *.pth
-*.onnx
 *.engine
 *.bin
 weights/pretrained/
-weights/finetuned/
-weights/*.pt
-runs/
+runs/**/weights/
+
+# Allow fine-tuned model weights (tracked via Git LFS)
+!weights/finetuned/
+!weights/finetuned/**
+
+# Allow training plots, PR/F1 curves, and metrics from runs
+!runs/**/
+!runs/**/*.png
+!runs/**/*.csv
+!runs/**/*.yaml
+!runs/**/*.json
 
 # Training datasets, raw heavy videos, and archives
 data/raw/**/*.mp4
@@ -249,3 +256,7 @@ results/videos/
 *.pyd
 build/
 *.egg-info/
+
+*.rar
+*.zip
+*.7z

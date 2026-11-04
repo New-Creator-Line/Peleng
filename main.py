@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import sys
 import time
@@ -15,7 +16,7 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,9 +24,11 @@ import pandas as pd
 from src.camera_model import CameraTimeline, load_all_cameras
 from src.evaluator import TrajectoryEvaluator, load_ground_truth
 from src.mock_detections import generate_mock_detections, load_detections
+from src.rts_smoother import RTSSmoother10D
 from src.tracker_3d import KalmanFilter3D
+from src.tracker_ukf import UKF10DTracker
 from src.triangulator import MultiViewTriangulator
-from src.visualizer import plot_trajectory_comparison
+from src.visualizer import plot_dimension_convergence, plot_trajectory_comparison
 
 
 def is_box_occluded(
@@ -72,11 +75,16 @@ def run_pipeline(
     plot: bool = True,
     conf_threshold: float = 0.3,
     dt: float = 1.0 / 30.0,
+    tracker_type: str = "ukf",
+    use_rts: bool = True,
+    plot_dims: bool = True,
 ) -> pd.DataFrame:
     """
     Executes the full 3D reconstruction and tracking pipeline.
-    Works in both Validation Mode (when gt_csv is provided) and
-    Blind Test Mode (when gt_csv is None).
+    Supports both:
+    - 10D CTRV Unscented Kalman Filter with dynamic dimension estimation & RTS smoother (tracker_type='ukf')
+    - Legacy 3D Constant Velocity Kalman Filter (tracker_type='linear')
+    Works in both Validation Mode (when gt_csv is provided) and Blind Test Mode (when gt_csv is None).
     """
     start_time = time.perf_counter()
     calib_dir = _resolve_input_path(calib_dir, "хакатон" if "hackathon" in calib_dir else "data/raw/hackathon")
@@ -84,7 +92,7 @@ def run_pipeline(
         gt_csv = _resolve_input_path(gt_csv, "хакатон/object_transform_SM_AA_track.csv" if "ground_truth" in gt_csv or "hackathon" in gt_csv else "data/raw/hackathon/object_transform_SM_AA_track.csv")
 
     print("=" * 60)
-    print("  PELENG 3D VISION & TRACKING ENGINE (C++ / Python)")
+    print(f"  PELENG 3D VISION & TRACKING ENGINE [{tracker_type.upper()}]")
     print("=" * 60)
 
     # 1. Load Camera Calibrations
@@ -120,23 +128,21 @@ def run_pipeline(
     ]
     is_yolo_bbox = (not is_mock_mode) and (float(np.mean(sample_widths)) > 100.0 if sample_widths else False)
 
-    # 3. Setup 3D Triangulation & Kalman Filter
+    # 3. Setup 3D Triangulation & Filter
     triangulator = MultiViewTriangulator(reprojection_error_threshold_px=55.0)
-    tracker = KalmanFilter3D(dt=dt, process_noise_std=4.0, measurement_noise_std=1.5)
 
-    print("[3/5] Running Multi-view 3D Triangulation & Kalman Filtering...")
+    if tracker_type.lower() == "ukf":
+        tracker = UKF10DTracker(dt=dt, process_noise_std=8.0)
+    else:
+        tracker = KalmanFilter3D(dt=dt, process_noise_std=4.0, measurement_noise_std=1.5)
+
+    print(f"[3/5] Running Multi-view 3D Triangulation & {tracker_type.upper()} Filtering...")
     estimated_records = []
     triangulated_count = 0
     single_cam_count = 0
     coasted_count = 0
 
-    # Offset parameters compensating for the difference between the 2D bounding box
-    # geometric center (trailer body) and the Unreal Engine actor pivot (front cabin/axle)
-    alpha_2d_heading = 0.15 if is_yolo_bbox else 0.0
-    cabin_shift_3d = 800.0 if is_yolo_bbox else 0.0
-    cabin_z_shift = -65.0 if is_yolo_bbox else 0.0
     reproj_w_scale = 0.06 if is_yolo_bbox else 0.0
-
     t_recon_start = time.perf_counter()
 
     for frame_idx in range(max_frame + 1):
@@ -145,41 +151,15 @@ def run_pipeline(
         for o in valid_obs:
             o['is_occluded'] = is_box_occluded(o)
 
-        # Shift 2D bbox centers slightly toward the projected 3D heading (front cabin)
-        vel = tracker.get_velocity() if tracker.is_initialized else np.array([1.0, -0.35, 0.0])
-        speed_xy = float(np.linalg.norm(vel[:2]))
-        if not tracker.is_initialized or speed_xy > 50.0:
-            fwd_3d = np.array([vel[0], vel[1], 0.0], dtype=np.float64)
-            fwd_3d /= (np.linalg.norm(fwd_3d) + 1e-9)
-        else:
-            fwd_3d = None
-
-        if alpha_2d_heading > 0.0 and fwd_3d is not None:
-            ref_3d = tracker.x[:3] if tracker.is_initialized else None
-            for o in valid_obs:
-                m = cameras[o['cam_id']].get_model(frame_idx)
-                base_pt = ref_3d if ref_3d is not None else m.project_ray_to_z(o['u'], o['v'], target_z=450.0)
-                if base_pt is not None:
-                    u0, v0, z0 = m.project_point(base_pt)
-                    u1, v1, z1 = m.project_point(base_pt + fwd_3d * 500.0)
-                    if z0 > 0 and z1 > 0:
-                        du, dv = u1 - u0, v1 - v0
-                        dn = np.hypot(du, dv)
-                        if dn > 1e-3:
-                            ux, uy = du / dn, dv / dn
-                            o['u'] = o['u'] + ux * alpha_2d_heading * o.get('w', 0.0)
-                            o['v'] = o['v'] + uy * (alpha_2d_heading * 0.4) * o.get('h', 0.0) + 0.04 * o.get('h', 0.0)
-
-        # Group observations by camera ID (keep highest confidence per camera first,
-        # and support pairwise consensus to reject single-camera false positives)
-        by_cam: Dict[int, List[Dict[str, float]]] = {}
+        # Group observations by camera ID
+        by_cam: Dict[int, List[Dict[str, Any]]] = {}
         for obs in sorted(valid_obs, key=lambda x: x['conf'], reverse=True):
             by_cam.setdefault(obs['cam_id'], []).append(obs)
 
         pt_3d = None
         err = float("inf")
         cam_ids = list(by_cam.keys())
-        pred_pos = tracker.x[:3] if tracker.is_initialized else None
+        pred_pos = tracker.get_position() if tracker.is_initialized else None
         best_had_occlusion = False
 
         if len(cam_ids) >= 2:
@@ -191,14 +171,12 @@ def run_pipeline(
                     P2 = cameras[c2].get_model(frame_idx).get_projection_matrix()
                     for o1 in by_cam[c1][:2]:
                         for o2 in by_cam[c2][:2]:
-                            # Adaptive reprojection threshold scaled by bounding box width for close-up views
                             pair_thr = 28.0 + reproj_w_scale * max(o1.get('w', 0.0), o2.get('w', 0.0))
                             cand_pt, cand_err = triangulator.triangulate(
                                 [P1, P2], [(o1['u'], o1['v']), (o2['u'], o2['v'])]
                             )
                             if cand_pt is None or cand_err > pair_thr:
                                 continue
-                            # Reject unphysical underground or sky points (e.g. false-positive drone)
                             if not (-500.0 <= cand_pt[2] <= 2500.0):
                                 continue
                             inlier_Ps = [P1, P2]
@@ -231,94 +209,164 @@ def run_pipeline(
                                 pt_3d, err = cand_pt, cand_err
                                 best_had_occlusion = is_pair_occ
 
-        # Kalman Filter Step
-        if pt_3d is not None and err < 60.0:
-            pt_meas = pt_3d.copy()
-            pt_meas[2] += cabin_z_shift
-            if not tracker.is_initialized:
-                tracker.initialize(pt_meas)
-                curr_pos = pt_meas
-            else:
+        # Filter Step
+        if tracker_type.lower() == "ukf":
+            # 10D UKF Branch
+            if pt_3d is not None and err < 65.0:
+                pt_meas = pt_3d.copy()
+                if not tracker.is_initialized:
+                    # Initialize position from 3D triangulation
+                    tracker.initialize(pt_meas)
+                    curr_pos = pt_meas
+                else:
+                    tracker.predict()
+                    r_var = max(4.0, (err / 5.0) ** 2 * (2.2 if best_had_occlusion else 1.0))
+                    tracker.update_3d_point(pt_meas, R_cov=np.eye(3) * r_var, is_centroid=False)
+
+                    # Online dimension calibration: update with bounding boxes from active cameras
+                    for cid, c_obs in by_cam.items():
+                        c_model = cameras[cid].get_model(frame_idx)
+                        best_c_o = c_obs[0]
+                        tracker.update_camera_box(
+                            c_model,
+                            best_c_o['u'], best_c_o['v'],
+                            best_c_o['w'], best_c_o['h'],
+                            is_truncated=best_c_o.get('is_truncated', False),
+                        )
+                    curr_pos = tracker.get_position()
+                triangulated_count += 1
+            elif tracker.is_initialized and valid_obs:
+                # Single-camera update (Kt = 1) using known/learned 3D dimensions to constrain depth
                 tracker.predict()
-                noise_scale = max(0.5, err / 5.0) * (2.2 if best_had_occlusion else 1.0)
-                curr_pos = tracker.update(pt_meas, noise_scale=noise_scale)
-            triangulated_count += 1
-        elif tracker.is_initialized and valid_obs:
-            # Single-camera fallback when occluded on other cameras (e.g., behind trees on frames 200-305)
-            tracker.x[5] *= 0.7
-            pred_pt = tracker.predict()
-            target_z = float(0.85 * np.clip(pred_pt[2] - cabin_z_shift, 300.0, 520.0) + 0.15 * 360.0)
-            best_single_pt = None
-            best_dist = float("inf")
-            best_single_occ = False
-            for o in valid_obs:
-                if o['conf'] < 0.70:
-                    continue
-                m = cameras[o['cam_id']].get_model(frame_idx)
-                cand_single = m.project_ray_to_z(o['u'], o['v'], target_z=target_z)
-                if cand_single is not None:
-                    cand_single[2] += cabin_z_shift
-                    d = float(np.linalg.norm(cand_single[:2] - pred_pt[:2]))
-                    if d < 3500.0 and d < best_dist:
-                        best_dist = d
-                        best_single_pt = cand_single
-                        best_single_occ = bool(o.get('is_occluded', False))
-            if best_single_pt is not None:
-                noise_scale = 6.0 if best_single_occ else 3.0
-                curr_pos = tracker.update(best_single_pt, noise_scale=noise_scale)
+                best_single = max(valid_obs, key=lambda x: x['conf'])
+                c_model = cameras[best_single['cam_id']].get_model(frame_idx)
+                tracker.update_camera_box(
+                    c_model,
+                    best_single['u'], best_single['v'],
+                    best_single['w'], best_single['h'],
+                    is_truncated=best_single.get('is_truncated', False),
+                )
+                curr_pos = tracker.get_position()
                 single_cam_count += 1
             else:
-                curr_pos = pred_pt
-                coasted_count += 1
-        else:
-            # Coast on Kalman prediction (complete occlusion) or initialize on first frame
-            if tracker.is_initialized:
-                curr_pos = tracker.predict()
-                coasted_count += 1
-            elif valid_obs:
-                best_single = max(valid_obs, key=lambda x: x['conf'])
-                cam_model = cameras[best_single['cam_id']].get_model(frame_idx)
-                est_single = cam_model.project_ray_to_z(best_single['u'], best_single['v'], target_z=450.0)
-                if est_single is not None:
-                    est_single[2] += cabin_z_shift
-                    tracker.initialize(est_single)
-                    curr_pos = est_single
+                # Coasting (Kt = 0)
+                if tracker.is_initialized:
+                    curr_pos = tracker.predict()
+                    coasted_count += 1
+                elif valid_obs:
+                    best_single = max(valid_obs, key=lambda x: x['conf'])
+                    cam_model = cameras[best_single['cam_id']].get_model(frame_idx)
+                    est_single = cam_model.project_ray_to_z(best_single['u'], best_single['v'], target_z=300.0)
+                    if est_single is not None:
+                        tracker.initialize(est_single)
+                        curr_pos = est_single
+                    else:
+                        curr_pos = np.zeros(3)
                 else:
                     curr_pos = np.zeros(3)
+
+            tracker.commit_step(frame_idx)
+            dims = tracker.get_dimensions()
+            cov = tracker.get_covariance()
+            estimated_records.append({
+                "Frame": frame_idx,
+                "Loc_X": float(curr_pos[0]),
+                "Loc_Y": float(curr_pos[1]),
+                "Loc_Z": float(curr_pos[2]),
+                "Length": float(dims[0]),
+                "Width": float(dims[1]),
+                "Height": float(dims[2]),
+                "Sigma_X": float(math.sqrt(max(1e-4, cov[0, 0]))),
+                "Sigma_Y": float(math.sqrt(max(1e-4, cov[1, 1]))),
+                "Sigma_Z": float(math.sqrt(max(1e-4, cov[2, 2]))),
+            })
+        else:
+            # Legacy Linear Kalman Filter Branch
+            cabin_z_shift = -65.0 if is_yolo_bbox else 0.0
+            if pt_3d is not None and err < 60.0:
+                pt_meas = pt_3d.copy()
+                pt_meas[2] += cabin_z_shift
+                if not tracker.is_initialized:
+                    tracker.initialize(pt_meas)
+                    curr_pos = pt_meas
+                else:
+                    tracker.predict()
+                    noise_scale = max(0.5, err / 5.0) * (2.2 if best_had_occlusion else 1.0)
+                    curr_pos = tracker.update(pt_meas, noise_scale=noise_scale)
+                triangulated_count += 1
+            elif tracker.is_initialized and valid_obs:
+                tracker.x[5] *= 0.7
+                pred_pt = tracker.predict()
+                target_z = float(0.85 * np.clip(pred_pt[2] - cabin_z_shift, 300.0, 520.0) + 0.15 * 360.0)
+                best_single_pt = None
+                best_dist = float("inf")
+                best_single_occ = False
+                for o in valid_obs:
+                    if o['conf'] < 0.70:
+                        continue
+                    m = cameras[o['cam_id']].get_model(frame_idx)
+                    cand_single = m.project_ray_to_z(o['u'], o['v'], target_z=target_z)
+                    if cand_single is not None:
+                        cand_single[2] += cabin_z_shift
+                        d = float(np.linalg.norm(cand_single[:2] - pred_pt[:2]))
+                        if d < 3500.0 and d < best_dist:
+                            best_dist = d
+                            best_single_pt = cand_single
+                            best_single_occ = bool(o.get('is_occluded', False))
+                if best_single_pt is not None:
+                    noise_scale = 6.0 if best_single_occ else 3.0
+                    curr_pos = tracker.update(best_single_pt, noise_scale=noise_scale)
+                    single_cam_count += 1
+                else:
+                    curr_pos = pred_pt
+                    coasted_count += 1
             else:
-                curr_pos = np.zeros(3)
+                if tracker.is_initialized:
+                    curr_pos = tracker.predict()
+                    coasted_count += 1
+                elif valid_obs:
+                    best_single = max(valid_obs, key=lambda x: x['conf'])
+                    cam_model = cameras[best_single['cam_id']].get_model(frame_idx)
+                    est_single = cam_model.project_ray_to_z(best_single['u'], best_single['v'], target_z=450.0)
+                    if est_single is not None:
+                        est_single[2] += cabin_z_shift
+                        tracker.initialize(est_single)
+                        curr_pos = est_single
+                    else:
+                        curr_pos = np.zeros(3)
+                else:
+                    curr_pos = np.zeros(3)
 
-        estimated_records.append({
-            "Frame": frame_idx,
-            "Loc_X": float(curr_pos[0]),
-            "Loc_Y": float(curr_pos[1]),
-            "Loc_Z": float(curr_pos[2]),
-        })
+            estimated_records.append({
+                "Frame": frame_idx,
+                "Loc_X": float(curr_pos[0]),
+                "Loc_Y": float(curr_pos[1]),
+                "Loc_Z": float(curr_pos[2]),
+            })
 
-    # Post-filtering: shift along smoothed trajectory tangent (trailer center -> cabin pivot)
-    # and apply a 7-frame zero-phase moving average filter when running on YOLO bboxes
-    out_df = pd.DataFrame(estimated_records)
-    raw_xyz = out_df[["Loc_X", "Loc_Y", "Loc_Z"]].to_numpy(dtype=np.float64)
-    if cabin_shift_3d != 0.0 and len(raw_xyz) > 2:
-        shifted_xyz = raw_xyz.copy()
-        for f_i in range(len(raw_xyz)):
-            f0 = max(0, f_i - 8)
-            f1 = min(len(raw_xyz) - 1, f_i + 8)
-            dv = raw_xyz[f1, :2] - raw_xyz[f0, :2]
-            dn = float(np.linalg.norm(dv))
-            if dn > 10.0:
-                shifted_xyz[f_i, 0] += (dv[0] / dn) * cabin_shift_3d
-                shifted_xyz[f_i, 1] += (dv[1] / dn) * cabin_shift_3d
-        raw_xyz = (
-            pd.DataFrame(shifted_xyz)
-            .rolling(window=7, center=True, min_periods=1)
-            .mean()
-            .to_numpy()
-        )
-
-    out_df["Loc_X"] = np.round(raw_xyz[:, 0], 4)
-    out_df["Loc_Y"] = np.round(raw_xyz[:, 1], 4)
-    out_df["Loc_Z"] = np.round(raw_xyz[:, 2], 4)
+    # Post-processing / RTS Smoothing
+    if tracker_type.lower() == "ukf" and use_rts and len(tracker.history) > 0:
+        print("      Applying RTS Backward Smoother over 10D UKF history...")
+        smoother = RTSSmoother10D()
+        smoothed = smoother.smooth(tracker.history)
+        out_df = smoother.to_dataframe(smoothed)
+    else:
+        out_df = pd.DataFrame(estimated_records)
+        if tracker_type.lower() == "linear" and is_yolo_bbox:
+            raw_xyz = out_df[["Loc_X", "Loc_Y", "Loc_Z"]].to_numpy(dtype=np.float64)
+            shifted_xyz = raw_xyz.copy()
+            for f_i in range(len(raw_xyz)):
+                f0 = max(0, f_i - 8)
+                f1 = min(len(raw_xyz) - 1, f_i + 8)
+                dv = raw_xyz[f1, :2] - raw_xyz[f0, :2]
+                dn = float(np.linalg.norm(dv))
+                if dn > 10.0:
+                    shifted_xyz[f_i, 0] += (dv[0] / dn) * 800.0
+                    shifted_xyz[f_i, 1] += (dv[1] / dn) * 800.0
+            raw_xyz = pd.DataFrame(shifted_xyz).rolling(window=7, center=True, min_periods=1).mean().to_numpy()
+            out_df["Loc_X"] = np.round(raw_xyz[:, 0], 4)
+            out_df["Loc_Y"] = np.round(raw_xyz[:, 1], 4)
+            out_df["Loc_Z"] = np.round(raw_xyz[:, 2], 4)
 
     recon_elapsed = time.perf_counter() - t_recon_start
     fps = len(estimated_records) / max(1e-6, recon_elapsed)
@@ -327,7 +375,7 @@ def run_pipeline(
     print(
         f"      Triangulated (2+ cams): {triangulated_count} frames, "
         f"Single-cam ray tracked: {single_cam_count} frames, "
-        f"Kalman coasted: {coasted_count} frames"
+        f"Coasted: {coasted_count} frames"
     )
 
     # 4. Save Output Trajectory
@@ -354,21 +402,20 @@ def run_pipeline(
         print(f"      Saved metrics to: '{metrics_json}'")
 
         print("\n" + "-" * 40)
-        print("       ИТОГОВЫЕ МЕТРИКИ ПЕЛЕНГ")
+        print(f"       ИТОГОВЫЕ МЕТРИКИ ПЕЛЕНГ [{tracker_type.upper()}]")
         print("-" * 40)
-        print(f"  Официальный MAE 3D:  {metrics['mae_3d']:.4f} units")
-        print(f"  RMSE 3D:             {metrics['rmse_3d']:.4f} units")
-        print(f"  MAE X / Y / Z:       {metrics['mae_x']:.2f} / {metrics['mae_y']:.2f} / {metrics['mae_z']:.2f}")
-        print(f"  RMSE X / Y / Z:      {metrics['rmse_x']:.2f} / {metrics['rmse_y']:.2f} / {metrics['rmse_z']:.2f}")
-        print(f"  Скорость обработки:  {metrics['fps']:.1f} FPS")
+        print(f"  Официальный MAE 3D:  {metrics['mae_3d']:.4f} cm")
+        print(f"  RMSE 3D:             {metrics['rmse_3d']:.4f} cm")
+        print(f"  MAE X / Y / Z:       {metrics['mae_x']:.2f} / {metrics['mae_y']:.2f} / {metrics['mae_z']:.2f} cm")
         print("-" * 40)
-    else:
-        print("[5/5] Running in Blind Test mode (no Ground Truth provided).")
 
     if plot:
-        print(f"      Generating Slide 8 comparison plot -> '{plot_path}'...")
         plot_trajectory_comparison(out_df, gt_df, plot_path)
         print(f"      Saved comparison plot: '{plot_path}'")
+        if plot_dims and 'Length' in out_df.columns:
+            dim_plot_path = os.path.join(os.path.dirname(plot_path) or ".", "dimension_convergence.png")
+            plot_dimension_convergence(out_df, target_dims=(629.0, 207.0, 212.0), output_png_path=dim_plot_path)
+            print(f"      Saved dimension convergence plot: '{dim_plot_path}'")
 
     total_time = time.perf_counter() - start_time
     print(f"\nPipeline finished successfully in {total_time:.2f}s.\n")
@@ -386,25 +433,27 @@ def main():
     parser.add_argument("--calib-dir", default=default_calib, help="Directory with camera calibration CSV files")
     parser.add_argument(
         "--detections",
-        default="results/detections/detections_2d_yolo_real.csv",
+        default="results/detections/detections_2d_yolo26_seg.csv",
         help="Path to 2D detections CSV",
     )
     parser.add_argument("--gt", default=default_gt, help="Path to Ground Truth CSV (optional)")
     parser.add_argument(
         "--output",
-        default="results/trajectories/output_trajectory_yolo.csv",
+        default="results/trajectories/output_trajectory_ukf.csv",
         help="Output trajectory CSV file",
     )
     parser.add_argument(
         "--metrics-out",
-        default="results/metrics/metrics_summary_yolo.json",
+        default="results/metrics/metrics_summary_ukf.json",
         help="Output metrics JSON file",
     )
     parser.add_argument(
         "--plot-out",
-        default="results/plots/trajectory_comparison.png",
+        default="results/plots/trajectory_comparison_ukf.png",
         help="Output plot PNG file",
     )
+    parser.add_argument("--tracker-type", choices=["ukf", "linear"], default="ukf", help="Tracker engine type")
+    parser.add_argument("--no-rts", action="store_false", dest="use_rts", help="Disable RTS backward smoother")
     parser.add_argument("--plot", action="store_true", default=True, help="Generate Slide 8 comparison plot")
     parser.add_argument("--no-plot", action="store_false", dest="plot", help="Disable plotting")
     parser.add_argument("--conf-threshold", type=float, default=0.3, help="Confidence threshold for 2D detections")
@@ -423,6 +472,8 @@ def main():
         plot_path=args.plot_out,
         plot=args.plot,
         conf_threshold=args.conf_threshold,
+        tracker_type=args.tracker_type,
+        use_rts=args.use_rts,
     )
 
 
