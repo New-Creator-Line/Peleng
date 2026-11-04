@@ -112,6 +112,12 @@ def _normalize_payload(scene_payload: Dict[str, Any]) -> Dict[str, Any]:
     if "terrain_methods" in scene_payload and scene_payload["terrain_methods"] is not None:
         normalized["terrain_methods"] = dict(scene_payload["terrain_methods"])
 
+    if "models" in scene_payload and scene_payload["models"] is not None:
+        normalized["models"] = dict(scene_payload["models"])
+
+    if "active_model" in scene_payload and scene_payload["active_model"] is not None:
+        normalized["active_model"] = str(scene_payload["active_model"])
+
     return _sanitize_for_json(normalized)
 
 
@@ -503,28 +509,40 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       position: absolute;
       top: 16px;
       right: 16px;
-      width: 310px;
+      width: 330px;
+      min-width: 280px;
+      max-width: 700px;
       max-height: calc(100vh - 104px);
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 14px;
       display: flex;
       flex-direction: column;
       gap: 12px;
       transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    }
+
+    .panel-resizer-left {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 8px;
+      cursor: ew-resize;
+      background: transparent;
+      transition: background 0.15s ease;
+      z-index: 100;
+    }
+    .panel-resizer-left:hover, .panel-resizer-left.resizing {
+      background: rgba(0, 245, 212, 0.6);
+      box-shadow: 0 0 8px rgba(0, 245, 212, 0.8);
     }
 
     #hud-right.collapsed {
       transform: translateX(calc(100% + 24px));
       opacity: 0;
       pointer-events: none;
-    }
-
-    .telemetry-badges {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 6px;
-      flex-wrap: wrap;
     }
 
     .telemetry-grid {
@@ -772,27 +790,6 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
             <option value="vivid">Яркий: Красный / Изумрудный (GT)</option>
           </select>
         </div>
-        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px dashed rgba(56, 189, 248, 0.25);">
-          <div class="section-title" style="margin-bottom: 6px; color: #f8fafc; font-size: 10px;">Сравнение 4 методов рельефа</div>
-          <div class="layer-list" style="gap: 6px;">
-            <label class="layer-item">
-              <span id="label-method-epipolar" style="color:#00f5d4;font-weight:600;">🔵 Метод 1: Epipolar Stereo (Циан)</span>
-              <input type="checkbox" id="toggle-method-epipolar" />
-            </label>
-            <label class="layer-item">
-              <span id="label-method-carving" style="color:#f97316;font-weight:600;">🟠 Метод 2: Space Carving Горы (Оранж)</span>
-              <input type="checkbox" id="toggle-method-carving" />
-            </label>
-            <label class="layer-item">
-              <span id="label-method-depth" style="color:#a855f7;font-weight:600;">🟣 Метод 3: Metric Depth Облако (Фиолетовый)</span>
-              <input type="checkbox" id="toggle-method-depth" />
-            </label>
-            <label class="layer-item">
-              <span id="label-method-census" style="color:#fbbf24;font-weight:600;">💎 Метод 4: Census Transform Stereo (Хэмминг + Сектора)</span>
-              <input type="checkbox" id="toggle-method-census" checked />
-            </label>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -811,36 +808,16 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           <span class="legend-swatch" style="background:#38bdf8;"></span>
           <span>Active Camera Line-of-Sight Ray</span>
         </div>
-        <div class="legend-row">
-          <span class="legend-swatch" style="background:#00f5d4;"></span>
-          <span>Метод 1: Epipolar Stereo (Циан)</span>
-        </div>
-        <div class="legend-row">
-          <span class="legend-swatch" style="background:#f97316;"></span>
-          <span>Метод 2: Space Carving Горы (Оранж)</span>
-        </div>
-        <div class="legend-row">
-          <span class="legend-swatch" style="background:#a855f7;"></span>
-          <span>Метод 3: Metric Depth Облако (Фиолетовый)</span>
-        </div>
-        <div class="legend-row">
-          <span class="legend-swatch" style="background:#fbbf24;"></span>
-          <span>Метод 4: Census Transform Stereo (Золото)</span>
-        </div>
       </div>
     </div>
   </aside>
 
   <!-- Right Panel: Live Telemetry Readout -->
   <aside id="hud-right" class="hud-panel collapsed">
+    <div id="hud-right-resizer" class="panel-resizer-left" title="Потяните мышью для изменения ширины панели"></div>
     <div class="panel-header-bar">
       <span class="panel-header-title">📊 Телеметрия</span>
       <button id="btn-collapse-right" class="panel-collapse-btn" title="Скрыть панель">[ Скрыть — ]</button>
-    </div>
-
-    <div class="telemetry-badges">
-      <span class="pill-badge" id="badge-mode">VALIDATION MODE</span>
-      <span class="pill-badge" id="badge-depth-model">Depth: Depth-Anything-V2</span>
     </div>
 
     <div>
@@ -973,23 +950,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       return new THREE.Vector3(dx, dz, dy).normalize();
     }
 
-    // Initialize Mode & Static Accuracy Metrics (with defensive element guards)
-    const badgeDepthEl = document.getElementById('badge-depth-model');
-    if (badgeDepthEl) {
-      badgeDepthEl.textContent = `Depth: ${(meta.depth_model_used || 'Depth-Anything-V2').split('/').pop()}`;
-    }
-
-    const badgeMode = document.getElementById('badge-mode');
-    if (hasGT) {
-      if (badgeMode) {
-        badgeMode.textContent = 'VALIDATION (WITH GT)';
-        badgeMode.className = 'pill-badge mode-gt';
-      }
-    } else {
-      if (badgeMode) {
-        badgeMode.textContent = 'BLIND TEST MODE (NO GT)';
-        badgeMode.className = 'pill-badge mode-blind';
-      }
+    // Mode initialization & defensive element guards
+    if (!hasGT) {
       const toggleGtEl = document.getElementById('toggle-gt-traj');
       if (toggleGtEl) {
         toggleGtEl.checked = false;
@@ -1783,6 +1745,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       }
     };
 
+    let activeModelColor = null;
+
     function deduplicatePoints(pts, minDist = 0.05) {
       const out = [];
       for (let i = 0; i < pts.length; i++) {
@@ -1821,10 +1785,11 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       if (estCurve) {
         const tubularSegs = Math.min(360, Math.max(32, estCurve.points.length * 2));
         const geom = new THREE.TubeGeometry(estCurve, tubularSegs, radiusM, 8, false);
+        const col = (activeModelColor !== null) ? activeModelColor : style.estColor;
         const mat = new THREE.MeshStandardMaterial({
-          color: style.estColor,
-          emissive: style.estEmissive,
-          emissiveIntensity: style.estEmissiveIntensity,
+          color: col,
+          emissive: col,
+          emissiveIntensity: 0.45,
           roughness: 0.25,
           metalness: 0.35
         });
@@ -2331,11 +2296,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         'toggle-frustums': true,
         'toggle-rays': true,
         'toggle-est-traj': true,
-        'toggle-gt-traj': true,
-        'toggle-method-epipolar': false,
-        'toggle-method-carving': false,
-        'toggle-method-depth': false,
-        'toggle-method-census': true
+        'toggle-gt-traj': true
       },
       sliders: {
         'slider-pt-size': 2.6,
@@ -2392,11 +2353,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           'toggle-frustums',
           'toggle-rays',
           'toggle-est-traj',
-          'toggle-gt-traj',
-          'toggle-method-epipolar',
-          'toggle-method-carving',
-          'toggle-method-depth',
-          'toggle-method-census'
+          'toggle-gt-traj'
         ];
         layerIds.forEach(id => {
           const el = document.getElementById(id);
@@ -2506,30 +2463,6 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       if (selectSpeed) {
         playbackSpeed = parseFloat(selectSpeed.value);
       }
-
-      // 12. Method 1: Epipolar Stereo Points (Cyan)
-      const toggleEpipolar = document.getElementById('toggle-method-epipolar');
-      if (methodEpipolarObj && toggleEpipolar) {
-        methodEpipolarObj.visible = Boolean(toggleEpipolar.checked);
-      }
-
-      // 13. Method 2: Space Carving Visual Hull Mesh (Orange)
-      const toggleCarving = document.getElementById('toggle-method-carving');
-      if (methodCarvingObj && toggleCarving) {
-        methodCarvingObj.visible = Boolean(toggleCarving.checked);
-      }
-
-      // 14. Method 3: Metric Depth Point Cloud (Purple)
-      const toggleDepth = document.getElementById('toggle-method-depth');
-      if (methodDepthObj && toggleDepth) {
-        methodDepthObj.visible = Boolean(toggleDepth.checked);
-      }
-
-      // 15. Method 4: Census Transform Stereo (Gold)
-      const toggleCensus = document.getElementById('toggle-method-census');
-      if (layerGroupMethodCensus && toggleCensus) {
-        layerGroupMethodCensus.visible = Boolean(toggleCensus.checked);
-      }
     }
 
     function initViewerSettings() {
@@ -2596,11 +2529,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         'toggle-frustums',
         'toggle-rays',
         'toggle-est-traj',
-        'toggle-gt-traj',
-        'toggle-method-epipolar',
-        'toggle-method-carving',
-        'toggle-method-depth',
-        'toggle-method-census'
+        'toggle-gt-traj'
       ];
       layerIds.forEach(id => {
         const el = document.getElementById(id);
@@ -2693,6 +2622,15 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 elAxes.textContent = `${Number(m.mae_x || 0).toFixed(1)} / ${Number(m.mae_y || 0).toFixed(1)} / ${Number(m.mae_z || 0).toFixed(1)}`;
               }
             }
+            if (chosen.color) {
+              activeModelColor = parseInt(chosen.color.replace('#', '0x'), 16);
+            } else {
+              activeModelColor = null;
+            }
+            const swEst = document.getElementById('swatch-est');
+            if (swEst && chosen.color) {
+              swEst.style.background = chosen.color;
+            }
             const rawEst = [];
             frames.forEach(f => {
               if (f.est_pos_cm) {
@@ -2706,6 +2644,38 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
             }
             rebuildTrajectories(currentTrajRadius, currentTrajStyle);
             updateFrameState(currentFrameIdx);
+          }
+        });
+      }
+
+      // Resizable Telemetry Panel (Left Edge Drag)
+      const resizer = document.getElementById('hud-right-resizer');
+      const panelRight = document.getElementById('hud-right');
+      if (resizer && panelRight) {
+        let isResizing = false;
+        let startX = 0;
+        let startW = 0;
+        resizer.addEventListener('mousedown', e => {
+          isResizing = true;
+          startX = e.clientX;
+          startW = panelRight.getBoundingClientRect().width;
+          resizer.classList.add('resizing');
+          document.body.style.cursor = 'ew-resize';
+          document.body.style.userSelect = 'none';
+          e.preventDefault();
+        });
+        window.addEventListener('mousemove', e => {
+          if (!isResizing) return;
+          const dx = startX - e.clientX; // dragging left expands panel width
+          const newW = Math.max(280, Math.min(700, startW + dx));
+          panelRight.style.width = `${newW}px`;
+        });
+        window.addEventListener('mouseup', () => {
+          if (isResizing) {
+            isResizing = false;
+            resizer.classList.remove('resizing');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
           }
         });
       }

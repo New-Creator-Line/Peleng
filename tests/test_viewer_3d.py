@@ -453,38 +453,36 @@ def test_export_3d_viewer_html_tree_cloud_variations_graceful(tmp_path):
 
 def test_viewer_3d_census_stereo_controls_and_group(tmp_path):
     """
-    Verifies that the 3D Viewer HTML contains Method 4 Census Transform Stereo controls:
-    1. Checkbox #toggle-method-census with 'checked' by default.
-    2. Label #label-method-census with '💎 Метод 4: Census Transform Stereo'.
-    3. Three.js layerGroupMethodCensus initialization and scene integration.
-    4. Integration with DEFAULT_SETTINGS, saveViewerSettings, and syncAllLayersAndControls.
-    5. Method 4 entry in the Legend.
+    Verifies that the 3D Viewer HTML contains:
+    1. Multi-model selector #select-active-model and model description badge.
+    2. Telemetry panel left drag resizer #hud-right-resizer.
+    3. Normalization preserves 'models' and 'active_model'.
     """
     payload = _make_mock_scene_payload(has_ground_truth=True)
-    out_file = tmp_path / "census_controls_viewer.html"
+    payload["models"] = {
+        "m1": {
+            "id": "m1",
+            "name": "Model 1",
+            "frames": payload["frames"],
+            "metrics": payload["metrics"],
+        }
+    }
+    payload["active_model"] = "m1"
+    out_file = tmp_path / "model_selector_viewer.html"
     export_3d_viewer_html(payload, str(out_file))
     html = out_file.read_text(encoding="utf-8")
 
     # 1. UI Checkbox and Label
-    assert 'id="toggle-method-census"' in html
-    assert '<input type="checkbox" id="toggle-method-census" checked' in html
-    assert 'id="label-method-census"' in html
-    assert "💎 Метод 4: Census Transform Stereo (Хэмминг + Сектора)" in html
-    assert "Сравнение 4 методов рельефа" in html
+    assert 'id="select-active-model"' in html
+    assert 'id="model-desc-badge"' in html
 
-    # 2. Three.js client code
-    assert "layerGroupMethodCensus = new THREE.Group()" in html
-    assert "scene.add(layerGroupMethodCensus)" in html
-    assert "layerGroupMethodCensus.visible = Boolean(toggleCensus.checked)" in html
-    assert "PointsMaterial" in html
+    # 2. Resizer handle
+    assert 'id="hud-right-resizer"' in html
+    assert 'panel-resizer-left' in html
 
-    # 3. Settings persistence and initialization
-    assert "'toggle-method-census': true" in html
-    assert "'toggle-method-census'" in html
-
-    # 4. Legend swatch
-    assert "Метод 4: Census Transform Stereo (Золото)" in html
-    assert "#fbbf24" in html
+    # 3. Preserved models in JSON
+    assert '"models":{"m1":' in html
+    assert '"active_model":"m1"' in html
 
 
 def test_viewer_3d_payload_with_census_stereo_points(tmp_path):
@@ -565,7 +563,7 @@ def test_viewer_3d_census_stereo_missing_or_empty_graceful(tmp_path):
     out_empty = tmp_path / "census_empty.html"
     export_3d_viewer_html(payload_empty, str(out_empty))
     html_empty = out_empty.read_text(encoding="utf-8")
-    assert 'id="toggle-method-census"' in html_empty
+    assert 'id="select-active-model"' in html_empty
 
     # None terrain_methods
     payload_none = _make_mock_scene_payload(has_ground_truth=False)
@@ -573,7 +571,7 @@ def test_viewer_3d_census_stereo_missing_or_empty_graceful(tmp_path):
     out_none = tmp_path / "census_none.html"
     export_3d_viewer_html(payload_none, str(out_none))
     html_none = out_none.read_text(encoding="utf-8")
-    assert 'id="toggle-method-census"' in html_none
+    assert 'id="select-active-model"' in html_none
 
 
 def test_terrain_builder_includes_census_stereo_method():
