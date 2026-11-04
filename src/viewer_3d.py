@@ -2075,7 +2075,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           const upThree = ueDirToThree(rig.currentUp);
           camera.position.copy(rig.posThree);
           camera.up.copy(upThree);
-          controls.target.copy(rig.posThree.clone().add(fwdThree.multiplyScalar(80.0)));
+          camera.lookAt(rig.posThree.clone().add(fwdThree));
+          controls.target.copy(rig.posThree.clone().add(fwdThree.clone().multiplyScalar(80.0)));
 
           // Update PiP Crosshair if active ray exists for this camera
           const rayForCam = activeRays.find(r => String(r.cam_id) === camKey);
@@ -2846,7 +2847,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         }
       }
 
-      controls.update();
+      if (!activeCameraPreset || !activeCameraPreset.startsWith('cam_')) {
+        controls.update();
+      }
       updateCameraBadgesScreenPos();
       renderer.render(scene, camera);
     }
