@@ -222,8 +222,10 @@ __marimo__/
 
 # Machine Learning weights, checkpoints and training runs
 *.pth
+*.pt
 *.engine
 *.bin
+*.onnx
 weights/pretrained/
 runs/**/weights/
 
