@@ -52,7 +52,7 @@ class UKF10DTracker:
     def __init__(
         self,
         dt: float = 1.0 / 30.0,
-        process_noise_std: float = 10.0,
+        process_noise_std: float = 160.0,
         alpha: float = 1.0,
         beta: float = 0.0,
         kappa: float = 0.0,
@@ -98,7 +98,7 @@ class UKF10DTracker:
         dt4 = dt ** 4 / 4.0
 
         var_a = (self.process_noise_std) ** 2          # Longitudinal acceleration (cm/s^2)^2
-        var_omega_dot = (0.05) ** 2                    # Yaw acceleration (rad/s^2)^2
+        var_omega_dot = (0.5 ** 2) if self.process_noise_std > 0 else 0.0  # Yaw acceleration (rad/s^2)^2
         var_az = (3.0) ** 2                            # Vertical acceleration (cm/s^2)^2
         var_dim = 1e-4                                 # Quasistatic vehicle dimensions (cm^2)
 
@@ -182,6 +182,7 @@ class UKF10DTracker:
         self.coast_frames = 0
         self.history.clear()
         self._current_frame = 0
+        self._current_step_prior = (self.x.copy(), self.P.copy(), np.eye(self.n, dtype=np.float64) * 1e-4)
 
     def _generate_sigma_points(self, x: np.ndarray, P: np.ndarray) -> np.ndarray:
         """Generates 2n+1 scaled sigma points from mean x and covariance P."""
@@ -299,7 +300,7 @@ class UKF10DTracker:
         meas_3d: np.ndarray,
         R_cov: Optional[np.ndarray] = None,
         is_centroid: bool = False,
-        chi2_thresh: float = 7.815,
+        chi2_thresh: float = 99999.0,
     ) -> bool:
         """
         Sequential measurement update from 3D point (e.g. multi-view RANSAC triangulation).
@@ -311,7 +312,7 @@ class UKF10DTracker:
             return True
 
         z = np.asarray(meas_3d, dtype=np.float64).flatten()[:3]
-        R = np.eye(3, dtype=np.float64) * 4.0 if R_cov is None else np.asarray(R_cov, dtype=np.float64)
+        R = np.eye(3, dtype=np.float64) * 50.0 if R_cov is None else np.asarray(R_cov, dtype=np.float64)
 
         sigmas = self._generate_sigma_points(self.x, self.P)
 
@@ -342,7 +343,7 @@ class UKF10DTracker:
 
         y = z - z_pred
 
-        # Mahalanobis gating
+        # Mahalanobis gating with Huber soft M-estimator
         try:
             inv_S = np.linalg.inv(S)
             d_m2 = float(y.T @ inv_S @ y)
@@ -350,7 +351,8 @@ class UKF10DTracker:
             return False
 
         if d_m2 > chi2_thresh:
-            return False
+            weight = math.sqrt(chi2_thresh / d_m2)
+            y = y * weight
 
         # Kalman gain
         K = Pxz @ inv_S
@@ -375,19 +377,18 @@ class UKF10DTracker:
         w: float,
         h: float,
         is_truncated: bool = False,
-        chi2_thresh: float = 9.488,
+        chi2_thresh: float = 35.0,
     ) -> bool:
         """
         Sequential measurement update using camera 2D observation: z = [u_c, v_c, w_px, h_px]^T.
         Directly adjusts dimensions (L, W, H) and depth along the camera ray.
         """
-        if not self.is_initialized:
+        if not self.is_initialized or is_truncated:
             return False
 
         z = np.array([u, v, w, h], dtype=np.float64)
-        R_scale = 4.0 if is_truncated else 1.0
-        # Base pixel variances: center (2 px std) -> 4 px^2, extent (4 px std) -> 16 px^2
-        R = np.diag([4.0, 4.0, 16.0, 16.0]) * R_scale
+        # Pixel variances: center (4 px std) -> 16 px^2, extent (15 px std / 12 px std)
+        R = np.diag([16.0, 16.0, 225.0, 150.0])
 
         sigmas = self._generate_sigma_points(self.x, self.P)
         sigmas_z = np.zeros((self.num_sigmas, 4), dtype=np.float64)
@@ -431,20 +432,24 @@ class UKF10DTracker:
             return False
 
         if d_m2 > chi2_thresh:
-            return False
+            weight = math.sqrt(chi2_thresh / d_m2)
+            y = y * weight
 
         K = Pxz @ inv_S
         dx_corr = K @ y
-        self.x += dx_corr
-        self.x[4] = normalize_angle(self.x[4])
+
+        # Update physical dimensions L, W, H (indices 7, 8, 9) to decouple geometry from position
+        self.x[7:10] += dx_corr[7:10]
 
         # Physical sanity bounds for dimensions (cm)
-        self.x[7] = float(np.clip(self.x[7], 150.0, 2000.0))
-        self.x[8] = float(np.clip(self.x[8], 100.0, 450.0))
-        self.x[9] = float(np.clip(self.x[9], 100.0, 450.0))
+        self.x[7] = float(np.clip(self.x[7], 200.0, 1200.0))
+        self.x[8] = float(np.clip(self.x[8], 150.0, 350.0))
+        self.x[9] = float(np.clip(self.x[9], 150.0, 350.0))
 
-        self.P = self.P - K @ S @ K.T
-        self.P = 0.5 * (self.P + self.P.T)
+        # Update covariance without distorting position/heading blocks
+        K_dim = K[7:10, :]
+        self.P[7:10, 7:10] -= (K_dim @ S @ K_dim.T)
+        self.P[7:10, 7:10] = 0.5 * (self.P[7:10, 7:10] + self.P[7:10, 7:10].T)
 
         self.coast_frames = 0
         return True

@@ -253,3 +253,83 @@ def project_cuboid_to_camera_bbox(
         edges_2d.append((p1, p2))
 
     return bbox_2d, pts_2d, edges_2d
+
+
+def draw_cuboid_wireframe_hud(
+    frame: np.ndarray,
+    cuboid: TruckCuboid3D,
+    cam_model: CameraModel,
+    edge_color: Tuple[int, int, int] = (0, 230, 255),
+    front_face_color: Tuple[int, int, int] = (0, 100, 255),
+    thickness: int = 2,
+    draw_vertices: bool = True,
+) -> bool:
+    """
+    Renders 3D rigid cuboid wireframe onto camera image frame.
+    Highlights front cabin face for clear heading orientation.
+    """
+    proj = project_cuboid_to_camera_bbox(cuboid, cam_model, img_w=frame.shape[1], img_h=frame.shape[0])
+    if proj is None:
+        return False
+
+    bbox_2d, pts_2d, edges_2d = proj
+
+    # 1. Fill front cabin face with translucent overlay
+    front_indices = cuboid.get_front_face_indices()
+    front_pts = np.asarray([pts_2d[i] for i in front_indices], dtype=np.int32).reshape((-1, 1, 2))
+    overlay = frame.copy()
+    cv2.fillPoly(overlay, [front_pts], front_face_color)
+    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+
+    # 2. Draw 12 wireframe edges
+    for p1, p2 in edges_2d:
+        pt1 = (int(round(p1[0])), int(round(p1[1])))
+        pt2 = (int(round(p2[0])), int(round(p2[1])))
+        cv2.line(frame, pt1, pt2, edge_color, thickness, lineType=cv2.LINE_AA)
+
+    # 3. Draw vertices
+    if draw_vertices:
+        for p in pts_2d:
+            cv2.circle(frame, (int(round(p[0])), int(round(p[1]))), 3, (255, 255, 255), -1, lineType=cv2.LINE_AA)
+
+    return True
+
+
+def draw_uncertainty_ellipsoid_hud(
+    frame: np.ndarray,
+    ellipsoid: UncertaintyEllipsoid3D,
+    cam_model: CameraModel,
+    color: Tuple[int, int, int] = (180, 50, 240),
+    thickness: int = 1,
+    num_samples: int = 36,
+) -> bool:
+    """
+    Projects 3D principal meridian circles of 95% confidence ellipsoid onto camera frame.
+    """
+    center = ellipsoid.center
+    radii = ellipsoid.radii
+    axes = ellipsoid.axes
+
+    angles = np.linspace(0, 2.0 * math.pi, num_samples, endpoint=True)
+    cos_a, sin_a = np.cos(angles), np.sin(angles)
+
+    meridians = [
+        np.column_stack([radii[0] * cos_a, radii[1] * sin_a, np.zeros_like(cos_a)]),
+        np.column_stack([radii[0] * cos_a, np.zeros_like(cos_a), radii[2] * sin_a]),
+        np.column_stack([np.zeros_like(cos_a), radii[1] * cos_a, radii[2] * sin_a]),
+    ]
+
+    for circle in meridians:
+        world_pts = (circle @ axes.T) + center
+        cam_pts = (world_pts @ cam_model.R_cam.T) + cam_model.t_cam.reshape(1, 3)
+        if np.any(cam_pts[:, 2] <= 1.0):
+            continue
+        uv_h = cam_pts @ cam_model.K.T
+        depths = np.maximum(uv_h[:, 2:], 1e-6)
+        pts_2d = uv_h[:, :2] / depths
+
+        pts_int = np.asarray(np.round(pts_2d), dtype=np.int32).reshape((-1, 1, 2))
+        cv2.polylines(frame, [pts_int], isClosed=True, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+    return True
+

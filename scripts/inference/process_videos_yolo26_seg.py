@@ -189,6 +189,7 @@ def process_videos_yolo26_seg(
     videos_dir: str = "data/raw/hackathon",
     output_dir: str = "results/videos",
     csv_output: str = "results/detections/detections_2d_yolo26_seg.csv",
+    trajectory_csv: Optional[str] = "results/trajectories/output_trajectory_ukf.csv",
     conf_threshold: float = 0.25,
     imgsz: int = 1024,
     device: str = "0",
@@ -209,6 +210,20 @@ def process_videos_yolo26_seg(
 
     logger.info("Loading fine-tuned YOLO26x-seg from: %s", wt_path.resolve())
     model = YOLO(str(wt_path))
+
+    # Optional 3D Trajectory for HUD overlay
+    cam_models = None
+    traj_dict = None
+    if trajectory_csv and Path(trajectory_csv).exists():
+        try:
+            from src.camera_model import load_all_cameras
+            from src.cuboid_model import TruckCuboid3D, draw_cuboid_wireframe_hud, compute_uncertainty_ellipsoid_3d, draw_uncertainty_ellipsoid_hud
+            cam_models = load_all_cameras(videos_dir)
+            t_df = pd.read_csv(trajectory_csv, sep=';')
+            traj_dict = {int(r["Frame"]): r for _, r in t_df.iterrows()}
+            logger.info("Loaded 3D trajectory with %d frames for 3D HUD rendering", len(traj_dict))
+        except Exception as e:
+            logger.warning("Could not load 3D trajectory for HUD rendering: %s", e)
 
     # 2. Map video files
     cam_videos: Dict[int, str] = {}
@@ -351,6 +366,29 @@ def process_videos_yolo26_seg(
                     }
                     n_dets += 1
 
+                # Draw 3D Cuboid & Uncertainty Ellipsoid HUD if available
+                if traj_dict is not None and cam_models is not None and f_idx in traj_dict and c_id in cam_models:
+                    tr = traj_dict[f_idx]
+                    yaw = float(tr.get("Yaw", 0.0))
+                    length = float(tr.get("Length", 629.0))
+                    width = float(tr.get("Width", 207.0))
+                    height = float(tr.get("Height", 212.0))
+                    cuboid = TruckCuboid3D(
+                        x=float(tr["Loc_X"]),
+                        y=float(tr["Loc_Y"]),
+                        z=float(tr["Loc_Z"]),
+                        yaw=yaw,
+                        length=length,
+                        width=width,
+                        height=height,
+                    )
+                    cam_m = cam_models[c_id].get_model(f_idx)
+                    draw_cuboid_wireframe_hud(frame, cuboid, cam_m)
+                    if "Sigma_X" in tr and "Sigma_Y" in tr and "Sigma_Z" in tr:
+                        cov = np.diag([float(tr["Sigma_X"]) ** 2, float(tr["Sigma_Y"]) ** 2, float(tr["Sigma_Z"]) ** 2])
+                        ellipsoid = compute_uncertainty_ellipsoid_3d(cov, center=cuboid.get_centroid())
+                        draw_uncertainty_ellipsoid_hud(frame, ellipsoid, cam_m)
+
                 # Draw top HUD
                 draw_hud_header(frame, c_id, f_idx, total_frames, n_dets)
 
@@ -390,9 +428,12 @@ def process_videos_yolo26_seg(
     logger.info("Video processing complete in %.2f s (Average speed: %.1f FPS)", total_frames / total_time * 5 if total_time else 0, total_frames / total_time if total_time else 0)
 
     # Save CSV with semicolon delimiter compatible with main.py pipeline
-    df = pd.DataFrame(detection_records)
-    df.to_csv(csv_output, sep=';', index=False)
-    logger.info("Saved %d total detections to: %s", len(df), csv_output)
+    if max_frames is None or not Path(csv_output).exists():
+        df = pd.DataFrame(detection_records)
+        df.to_csv(csv_output, sep=';', index=False)
+        logger.info("Saved %d total detections to: %s", len(df), csv_output)
+    else:
+        logger.info("Preview run (max_frames=%d): preserved existing full %s", max_frames, csv_output)
 
     return {
         "total_frames": total_frames,
@@ -410,6 +451,7 @@ def parse_args():
     parser.add_argument("--videos-dir", default="data/raw/hackathon")
     parser.add_argument("--output-dir", default="results/videos")
     parser.add_argument("--csv-output", default="results/detections/detections_2d_yolo26_seg.csv")
+    parser.add_argument("--trajectory", default="results/trajectories/output_trajectory_ukf.csv", help="3D trajectory CSV for HUD wireframe overlay")
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--imgsz", type=int, default=1024)
     parser.add_argument("--device", default="0" if torch.cuda.is_available() else "cpu")
@@ -424,6 +466,7 @@ if __name__ == "__main__":
         videos_dir=args.videos_dir,
         output_dir=args.output_dir,
         csv_output=args.csv_output,
+        trajectory_csv=args.trajectory,
         conf_threshold=args.conf,
         imgsz=args.imgsz,
         device=args.device,

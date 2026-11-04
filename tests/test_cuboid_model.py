@@ -8,6 +8,8 @@ from src.cuboid_model import (
     UncertaintyEllipsoid3D,
     compute_uncertainty_ellipsoid_3d,
     project_cuboid_to_camera_bbox,
+    draw_cuboid_wireframe_hud,
+    draw_uncertainty_ellipsoid_hud,
 )
 
 
@@ -171,3 +173,36 @@ def test_project_cuboid_behind_camera_returns_none():
     cuboid = TruckCuboid3D(-500.0, 0.0, 0.0, 0.0, 400.0, 200.0, 200.0)
     proj_res = project_cuboid_to_camera_bbox(cuboid, cam, img_w=1920, img_h=1080)
     assert proj_res is None
+
+
+def test_draw_cuboid_wireframe_hud():
+    """Verify 3D cuboid wireframe renders onto an image canvas without errors."""
+    cam = CameraModel(
+        cam_id=1,
+        loc=np.array([0.0, 0.0, 0.0]),
+        rot=np.array([0.0, 0.0, 0.0]),
+    )
+    cuboid = TruckCuboid3D(1000.0, 0.0, -50.0, 0.0, 400.0, 200.0, 100.0)
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    rendered = draw_cuboid_wireframe_hud(frame, cuboid, cam)
+    assert rendered is True
+    # Canvas should have non-zero pixels from drawing
+    assert np.count_nonzero(frame) > 0
+
+
+def test_draw_uncertainty_ellipsoid_hud():
+    """Verify 3D uncertainty ellipsoid renders onto an image canvas without errors."""
+    cam = CameraModel(
+        cam_id=1,
+        loc=np.array([0.0, 0.0, 0.0]),
+        rot=np.array([0.0, 0.0, 0.0]),
+    )
+    cov = np.diag([100.0, 50.0, 25.0])
+    ellipsoid = compute_uncertainty_ellipsoid_3d(cov, center=np.array([1000.0, 0.0, 0.0]))
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    rendered = draw_uncertainty_ellipsoid_hud(frame, ellipsoid, cam)
+    assert rendered is True
+    assert np.count_nonzero(frame) > 0
+
