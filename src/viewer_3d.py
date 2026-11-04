@@ -1747,14 +1747,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       frames.forEach(f => {
         if (f.est_pos_cm) {
           const p = ueToThree(f.est_pos_cm);
-          rawEst.push(new THREE.Vector3(p.x, p.y, p.z));
+          rawEst.push(new THREE.Vector3(p.x, p.y - 2.80 + 0.35, p.z));
           if (!hasGT || !f.gt_pos_cm) {
             rawRoad.push(new THREE.Vector3(p.x, p.y - 2.80, p.z));
           }
         }
         if (hasGT && f.gt_pos_cm) {
           const g = ueToThree(f.gt_pos_cm);
-          rawGt.push(new THREE.Vector3(g.x, g.y, g.z));
+          rawGt.push(new THREE.Vector3(g.x, g.y - 2.80 + 0.35, g.z));
           rawRoad.push(new THREE.Vector3(g.x, g.y - 2.80, g.z));
         }
       });
@@ -2004,6 +2004,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       const frameData = frames[currentFrameIdx];
       const estCm = frameData.est_pos_cm || [0, 0, 0];
       const estThree = ueToThree(estCm);
+      estThree.y -= 2.80;
       const headingRad = Number(frameData.heading_rad || 0.0);
 
       // Position & Rotate 3D Truck
@@ -2019,6 +2020,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       const shouldShowGt = hasGT && Boolean(frameData.gt_pos_cm) && (!gtCheck || gtCheck.checked);
       if (shouldShowGt) {
         const gtThree = ueToThree(frameData.gt_pos_cm);
+        gtThree.y -= 2.80;
         gtGhostGroup.position.copy(gtThree);
         gtGhostGroup.rotation.set(0, -headingRad, 0);
         gtGhostGroup.visible = true;
@@ -2054,8 +2056,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         const r = activeRays[i];
         activeCamSet.add(String(r.cam_id));
         const pOrig = ueToThree(r.origin_cm || [0, 0, 0]);
-        const pEnd = ueToThree(r.end_cm || estCm);
-        pEnd.y += 1.4; // Aim at truck center mass
+        const pEnd = estThree.clone();
+        pEnd.y += 1.8; // Aim at truck center mass (1.8m above road)
 
         const base = i * 6;
         rayPositions[base] = pOrig.x;
@@ -2625,7 +2627,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       frames.forEach(f => {
         if (f.est_pos_cm) {
           const p = ueToThree(f.est_pos_cm);
-          rawEst.push(new THREE.Vector3(p.x, p.y, p.z));
+          rawEst.push(new THREE.Vector3(p.x, p.y - 2.80 + 0.35, p.z));
           if (!hasGT || !f.gt_pos_cm) {
             rawRoad.push(new THREE.Vector3(p.x, p.y - 2.80, p.z));
           }
