@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import json
 import math
 import os
 import shutil
@@ -14,6 +15,33 @@ from scipy.ndimage import gaussian_filter
 
 from src.camera_model import CameraModel, CameraTimeline, load_all_cameras
 from src.evaluator import TrajectoryEvaluator
+
+try:
+    from src.terrain.epipolar_stereo import (
+        reconstruct_terrain as reconstruct_epipolar_stereo,
+        to_scene_payload_layer as epipolar_to_layer,
+    )
+except ImportError:
+    reconstruct_epipolar_stereo = None  # type: ignore
+    epipolar_to_layer = None  # type: ignore
+
+try:
+    from src.terrain.space_carving import (
+        reconstruct_terrain as reconstruct_space_carving,
+        to_scene_payload_layer as space_carving_to_layer,
+    )
+except ImportError:
+    reconstruct_space_carving = None  # type: ignore
+    space_carving_to_layer = None  # type: ignore
+
+try:
+    from src.terrain.metric_depth import (
+        reconstruct_terrain as reconstruct_metric_depth,
+        to_scene_payload_layer as metric_depth_to_layer,
+    )
+except ImportError:
+    reconstruct_metric_depth = None  # type: ignore
+    metric_depth_to_layer = None  # type: ignore
 
 MODEL_ID = "depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf"
 FRUSTUM_DISTANCE_CM = 4000.0
@@ -651,34 +679,35 @@ def build_scene_3d_payload(
             "thumbnail_b64": thumb_b64,
         }
 
-    # Load or compute Depth-Anything-V2-Metric-Outdoor relief maps
-    relief_maps, depth_model_used = _load_or_compute_neural_relief_maps(
-        calib_dir=calib_dir,
-        cameras=cameras,
-        cam_frames=cam_frames,
-        use_depth_model=use_depth_model,
-    )
+    # Load user-marked Ground Truth Landmarks (GCP)
+    landmarks_payload: List[Dict[str, Any]] = []
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    gcp_path = os.path.join(repo_root, "results", "calibration", "ground_truth_landmarks.json")
+    if os.path.exists(gcp_path):
+        try:
+            with open(gcp_path, "r", encoding="utf-8") as f:
+                gcp_data = json.load(f)
+                landmarks_payload = list(gcp_data.get("landmarks", []))
+        except Exception:
+            pass
 
-    # Build unified physically-grounded elevation surface Z(X, Y)
+    # Build clean straight valley floor terrain mesh aligned with road trajectory
     evaluate_z = _build_unified_terrain_evaluator(
         traj_pts=traj_pts,
         cameras=cameras,
-        relief_maps=relief_maps,
+        relief_maps={},
         ref_frame=ref_frame,
     )
-
     x_grid = np.linspace(x_min, x_max, grid_size, dtype=np.float64)
     y_grid = np.linspace(y_min, y_max, grid_size, dtype=np.float64)
     xx, yy = np.meshgrid(x_grid, y_grid)
     zz = evaluate_z(xx, yy)
-
-    z_matrix_cm: List[List[float]] = []
-    rgb_matrix: List[List[List[int]]] = []
+    z_matrix_cm = []
+    rgb_matrix = []
     priority_cams = [2, 4, 1, 3, 5]
-
     for r_idx in range(grid_size):
-        z_row: List[float] = []
-        rgb_row: List[List[int]] = []
+        z_row = []
+        rgb_row = []
         for c_idx in range(grid_size):
             gx = float(x_grid[c_idx])
             gy = float(y_grid[r_idx])
@@ -703,6 +732,7 @@ def build_scene_3d_payload(
         "z_matrix_cm": z_matrix_cm,
         "rgb_matrix": rgb_matrix,
     }
+    depth_model_used = "Straight Planar Valley Floor (Road-Aligned)"
 
     # Build point cloud 100% locked onto the terrain_mesh surface
     pts_cloud, cols_cloud = _build_locked_surface_point_cloud(
@@ -860,6 +890,96 @@ def build_scene_3d_payload(
         "bounds_cm": bounds_cm,
     }
 
+    # Package visible terrain across 3 distinct reconstruction methods
+    terrain_methods: Dict[str, Any] = {}
+    resolved_video_dir = calib_dir
+
+    # Method 1: Epipolar Stereo
+    if reconstruct_epipolar_stereo is not None and epipolar_to_layer is not None:
+        try:
+            p1 = reconstruct_epipolar_stereo(calib_dir=calib_dir, video_dir=resolved_video_dir, frame_idx=0)
+            l1 = epipolar_to_layer(p1)
+            terrain_methods["epipolar_stereo"] = {
+                "vertices": l1.get("point_cloud", {}).get("points_cm", []),
+                "colors": l1.get("point_cloud", {}).get("colors_rgb", []),
+                "runtime_ms": round(float(p1.get("stats", {}).get("runtime_ms", 0.0)), 2),
+                "stats": dict(p1.get("stats", {})),
+            }
+        except Exception as exc:
+            terrain_methods["epipolar_stereo"] = {
+                "vertices": [],
+                "colors": [],
+                "runtime_ms": 0.0,
+                "stats": {"vertex_count": 0, "face_count": 0, "runtime_ms": 0.0, "error": str(exc)},
+            }
+    else:
+        terrain_methods["epipolar_stereo"] = {
+            "vertices": [],
+            "colors": [],
+            "runtime_ms": 0.0,
+            "stats": {"vertex_count": 0, "face_count": 0, "runtime_ms": 0.0},
+        }
+
+    # Method 2: Space Carving
+    if reconstruct_space_carving is not None and space_carving_to_layer is not None:
+        try:
+            p2 = reconstruct_space_carving(calib_dir=calib_dir, video_dir=resolved_video_dir, frame_idx=0)
+            l2 = space_carving_to_layer(p2)
+            terrain_methods["space_carving"] = {
+                "vertices": l2.get("mesh", {}).get("vertices", []),
+                "faces": l2.get("mesh", {}).get("faces", []),
+                "colors": l2.get("mesh", {}).get("colors", []),
+                "runtime_ms": round(float(p2.get("stats", {}).get("runtime_ms", 0.0)), 2),
+                "stats": dict(p2.get("stats", {})),
+            }
+        except Exception as exc:
+            terrain_methods["space_carving"] = {
+                "vertices": [],
+                "faces": [],
+                "colors": [],
+                "runtime_ms": 0.0,
+                "stats": {"vertex_count": 0, "face_count": 0, "runtime_ms": 0.0, "error": str(exc)},
+            }
+    else:
+        terrain_methods["space_carving"] = {
+            "vertices": [],
+            "faces": [],
+            "colors": [],
+            "runtime_ms": 0.0,
+            "stats": {"vertex_count": 0, "face_count": 0, "runtime_ms": 0.0},
+        }
+
+    # Method 3: Metric Depth
+    if reconstruct_metric_depth is not None and metric_depth_to_layer is not None:
+        try:
+            p3 = reconstruct_metric_depth(
+                calib_dir=calib_dir,
+                video_dir=resolved_video_dir,
+                frame_idx=0,
+                use_neural=use_depth_model,
+            )
+            l3 = metric_depth_to_layer(p3)
+            terrain_methods["metric_depth"] = {
+                "vertices": l3.get("point_cloud", {}).get("points_cm", []),
+                "colors": l3.get("point_cloud", {}).get("colors_rgb", []),
+                "runtime_ms": round(float(p3.get("stats", {}).get("runtime_ms", 0.0)), 2),
+                "stats": dict(p3.get("stats", {})),
+            }
+        except Exception as exc:
+            terrain_methods["metric_depth"] = {
+                "vertices": [],
+                "colors": [],
+                "runtime_ms": 0.0,
+                "stats": {"vertex_count": 0, "face_count": 0, "runtime_ms": 0.0, "error": str(exc)},
+            }
+    else:
+        terrain_methods["metric_depth"] = {
+            "vertices": [],
+            "colors": [],
+            "runtime_ms": 0.0,
+            "stats": {"vertex_count": 0, "face_count": 0, "runtime_ms": 0.0},
+        }
+
     return {
         "meta": meta_payload,
         "metrics": metrics_payload,
@@ -872,6 +992,8 @@ def build_scene_3d_payload(
             "points_cm": [],
             "colors_rgb": [],
         },
+        "landmarks": landmarks_payload,
         "cameras": cameras_payload,
         "frames": frames_payload,
+        "terrain_methods": terrain_methods,
     }

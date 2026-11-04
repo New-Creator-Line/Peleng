@@ -1,0 +1,40 @@
+{
+  "description": "User-labeled Ground Truth Landmarks (GCP) triangulated across multi-camera stereo pairs",
+  "generated_at": "2026-11-04T02:07:00",
+  "landmarks": [
+    {
+      "name": "Tree 1 (Border Cam 1 & Cam 2)",
+      "cameras": [1, 2],
+      "points_2d": {
+        "1": [1918.0, 693.0],
+        "2": [324.0, 757.0]
+      },
+      "position_3d_cm": [-10374.32, -11253.85, 22.44],
+      "reprojection_error_px": 0.34,
+      "notes": "First roadside pine tree on the visual boundary of Cam 1 and Cam 2"
+    },
+    {
+      "name": "Tree 2 (Border Cam 1 & Cam 2)",
+      "cameras": [1, 2],
+      "points_2d": {
+        "1": [1758.0, 693.0],
+        "2": [224.0, 788.0]
+      },
+      "position_3d_cm": [-11399.89, -11848.41, 17.99],
+      "reprojection_error_px": 0.28,
+      "notes": "Second roadside pine tree on the visual boundary of Cam 1 and Cam 2"
+    },
+    {
+      "name": "Tree 3 (Trifocal Landmark: Cam 2, Cam 3 & Cam 5)",
+      "cameras": [2, 3, 5],
+      "points_2d": {
+        "2": [681.0, 472.0],
+        "3": [1498.0, 632.0],
+        "5": [1606.0, 682.0]
+      },
+      "position_3d_cm": [2918.82, -9339.48, 26.24],
+      "reprojection_error_px": 0.45,
+      "notes": "Central hillside tree visible across 3 cameras (Cam 2, 3, 5) with sub-pixel 0.45px alignment"
+    }
+  ]
+}

@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Peleng 3D — Разметка эталонных ориентиров (Zoom & Pan)</title>
+  <style>
+    body {
+      margin: 0; padding: 14px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0d1117; color: #f0f3f6; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;
+      padding-bottom: 8px; border-bottom: 1px solid #30363d;
+    }
+    h1 { font-size: 17px; margin: 0; font-weight: 600; color: #58a6ff; }
+    .nav-tabs { display: flex; gap: 8px; }
+    button.cam-btn {
+      background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px;
+      border-radius: 6px; cursor: pointer; font-weight: 500; font-size: 13px;
+    }
+    button.cam-btn.active {
+      background: #238636; border-color: #2ea043; color: #ffffff;
+    }
+    .zoom-toolbar {
+      display: flex; gap: 6px; align-items: center; background: #161b22; padding: 4px 8px; border-radius: 6px; border: 1px solid #30363d;
+    }
+    .zoom-btn {
+      background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 10px;
+      border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold;
+    }
+    .zoom-btn:hover { background: #30363d; }
+    .main-container {
+      display: flex; gap: 14px; flex: 1; min-height: 0;
+    }
+    .canvas-wrap {
+      flex: 1; position: relative; background: #010409; border: 1px solid #30363d;
+      border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center;
+      user-select: none;
+    }
+    #image-canvas { cursor: crosshair; display: block; }
+    .sidebar {
+      width: 400px; display: flex; flex-direction: column; gap: 10px; background: #161b22;
+      border: 1px solid #30363d; border-radius: 8px; padding: 14px; box-sizing: border-box;
+    }
+    .coords-hud {
+      font-family: monospace; font-size: 13px; background: #0d1117; padding: 8px 12px;
+      border-radius: 6px; border: 1px solid #30363d; color: #7ee787;
+    }
+    .instructions {
+      font-size: 12px; line-height: 1.45; color: #8b949e; background: #0d1117; padding: 8px 10px; border-radius: 6px; border: 1px solid #30363d;
+    }
+    .input-row { display: flex; gap: 8px; }
+    input[type="text"] {
+      flex: 1; background: #0d1117; border: 1px solid #30363d; color: #fff;
+      padding: 8px 10px; border-radius: 6px; font-size: 13px;
+    }
+    button.action-btn {
+      background: #1f6feb; border: none; color: #fff; padding: 8px 14px;
+      border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px;
+    }
+    button.action-btn:hover { background: #388bfd; }
+    .points-list {
+      flex: 1; overflow-y: auto; background: #0d1117; border: 1px solid #30363d;
+      border-radius: 6px; padding: 8px; font-size: 12px;
+    }
+    .point-item {
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+      padding: 6px 8px; border-bottom: 1px solid #21262d;
+    }
+    .point-item:last-child { border-bottom: none; }
+    .point-tag { font-weight: 600; color: #58a6ff; white-space: nowrap; font-size: 11px; }
+    .point-coords { color: #7ee787; font-family: monospace; font-size: 11px; white-space: nowrap; }
+    .point-name-edit {
+      flex: 1; background: #010409; border: 1px solid #30363d; color: #f0f3f6;
+      padding: 3px 6px; border-radius: 4px; font-size: 12px;
+    }
+    .point-name-edit:focus { border-color: #58a6ff; outline: none; }
+    .del-btn { color: #f85149; cursor: pointer; font-weight: bold; padding: 2px 6px; font-size: 14px; }
+    pre#json-output {
+      height: 110px; overflow: auto; background: #0a0c10; border: 1px solid #30363d;
+      padding: 8px; font-size: 11px; border-radius: 6px; color: #8b949e; margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🎯 Разметка эталонов: приближение колёсиком мыши + перетаскивание</h1>
+    <div class="nav-tabs">
+      <button class="cam-btn active" onclick="switchCam(1)">Камера 1</button>
+      <button class="cam-btn" onclick="switchCam(2)">Камера 2</button>
+      <button class="cam-btn" onclick="switchCam(3)">Камера 3</button>
+      <button class="cam-btn" onclick="switchCam(4)">Камера 4</button>
+      <button class="cam-btn" onclick="switchCam(5)">Камера 5</button>
+    </div>
+    <div class="zoom-toolbar">
+      <span style="font-size: 12px; color: #8b949e;">Зум:</span>
+      <button class="zoom-btn" onclick="zoomDelta(1.3)">➕</button>
+      <button class="zoom-btn" onclick="zoomDelta(1/1.3)">➖</button>
+      <button class="zoom-btn" onclick="resetZoom()">100%</button>
+      <button class="zoom-btn" onclick="fitToScreen()">Сброс</button>
+      <span id="zoom-level" style="font-size: 12px; font-family: monospace; color: #58a6ff; min-width: 45px;">100%</span>
+    </div>
+  </header>
+
+  <div class="main-container">
+    <div class="canvas-wrap" id="canvas-container">
+      <canvas id="image-canvas" width="1920" height="1080"></canvas>
+    </div>
+
+    <div class="sidebar">
+      <div class="instructions">
+        🔍 <b>Колёсико мыши</b> — приближение к курсору (до 10x).<br>
+        🖐 <b>Зажми правую кнопку мыши</b> (или пробел + левую) — двигать кадр.<br>
+        🎯 <b>Левый клик</b> — ставит точку ровно в стык ствола с землёй.
+      </div>
+
+      <div class="coords-hud" id="coords-display">Камера 1 | Пиксели: X=----, Y=----</div>
+
+      <div class="input-row">
+        <input type="text" id="landmark-name" placeholder="Название (напр. Дерево 1, Дерево 2)" value="Дерево 1">
+        <button class="action-btn" onclick="addCurrentPoint()">+ Добавить</button>
+      </div>
+
+      <div style="font-weight: 600; font-size: 13px; color: #c9d1d9;">Размеченные эталонные точки:</div>
+      <div class="points-list" id="points-container"></div>
+
+      <div style="display: flex; gap: 8px;">
+        <button class="action-btn" style="flex: 1; background: #238636;" onclick="exportJSON()">📋 Скопировать JSON</button>
+        <button class="action-btn" style="background: #21262d; border: 1px solid #30363d;" onclick="clearAll()">Очистить</button>
+      </div>
+      <pre id="json-output">// Здесь появится готовый JSON для чата</pre>
+    </div>
+  </div>
+
+  <script>
+    let currentCam = 1;
+    let scale = 1.0;
+    let panX = 0, panY = 0;
+    let isDragging = false;
+    let startX = 0, startY = 0;
+    let spacePressed = false;
+
+    let currentHover = { u: 0, v: 0 };
+    let currentClick = null;
+    let landmarks = JSON.parse(localStorage.getItem('peleng_gcp_landmarks') || '[]');
+
+    const container = document.getElementById('canvas-container');
+    const canvas = document.getElementById('image-canvas');
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+
+    function loadCamImage(camId) {
+      currentCam = camId;
+      document.querySelectorAll('.cam-btn').forEach((b, idx) => {
+        b.classList.toggle('active', (idx + 1) === camId);
+      });
+      img.src = `calibration/clean_frames/cam${camId}_frame0.jpg`;
+      img.onload = () => {
+        fitToScreen();
+      };
+    }
+
+    function fitToScreen() {
+      const cw = container.clientWidth;
+      const ch = container.clientHeight;
+      scale = Math.min(cw / 1920, ch / 1080);
+      panX = (cw - 1920 * scale) / 2;
+      panY = (ch - 1080 * scale) / 2;
+      updateTransform();
+      redraw();
+    }
+
+    function resetZoom() {
+      scale = 1.0;
+      panX = (container.clientWidth - 1920) / 2;
+      panY = (container.clientHeight - 1080) / 2;
+      updateTransform();
+      redraw();
+    }
+
+    function zoomDelta(factor) {
+      const cx = container.clientWidth / 2;
+      const cy = container.clientHeight / 2;
+      applyZoom(factor, cx, cy);
+    }
+
+    function applyZoom(factor, clientX, clientY) {
+      const newScale = Math.min(12.0, Math.max(0.2, scale * factor));
+      const rect = container.getBoundingClientRect();
+      const mouseX = clientX - rect.left;
+      const mouseY = clientY - rect.top;
+
+      panX = mouseX - (mouseX - panX) * (newScale / scale);
+      panY = mouseY - (mouseY - panY) * (newScale / scale);
+      scale = newScale;
+      updateTransform();
+      redraw();
+    }
+
+    function updateTransform() {
+      document.getElementById('zoom-level').innerText = `${Math.round(scale * 100)}%`;
+    }
+
+    function redraw() {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.setTransform(scale, 0, 0, scale, panX, panY);
+      ctx.drawImage(img, 0, 0, 1920, 1080);
+
+      // Draw saved landmarks
+      landmarks.filter(pt => pt.cam === currentCam).forEach(pt => {
+        // Red target circle
+        ctx.fillStyle = '#ff7b72';
+        ctx.beginPath();
+        ctx.arc(pt.u, pt.v, Math.max(4, 5 / scale), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = Math.max(1.5, 2 / scale);
+        ctx.stroke();
+
+        // Crosshairs
+        const arm = Math.max(6, 10 / scale);
+        ctx.beginPath();
+        ctx.moveTo(pt.u - arm, pt.v); ctx.lineTo(pt.u + arm, pt.v);
+        ctx.moveTo(pt.u, pt.v - arm); ctx.lineTo(pt.u, pt.v + arm);
+        ctx.stroke();
+
+        // Label
+        ctx.fillStyle = '#ffffff';
+        const fontSize = Math.max(12, Math.round(14 / scale));
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        ctx.shadowColor = '#000000';
+        ctx.shadowBlur = 4;
+        ctx.fillText(`${pt.name} (${pt.u}, ${pt.v})`, pt.u + arm + 2, pt.v + 4 / scale);
+        ctx.shadowBlur = 0;
+      });
+
+      // Draw current clicked point
+      if (currentClick) {
+        ctx.strokeStyle = '#7ee787';
+        ctx.lineWidth = Math.max(2, 2.5 / scale);
+        ctx.beginPath();
+        ctx.arc(currentClick.u, currentClick.v, Math.max(6, 8 / scale), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    // Wheel zoom centered on mouse
+    container.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const zoomFactor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
+      applyZoom(zoomFactor, e.clientX, e.clientY);
+    }, { passive: false });
+
+    // Keyboard space bar for panning
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' && !spacePressed) {
+        spacePressed = true;
+        canvas.style.cursor = 'grab';
+      }
+    });
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Space') {
+        spacePressed = false;
+        canvas.style.cursor = 'crosshair';
+      }
+    });
+
+    // Panning & Clicking
+    container.addEventListener('mousedown', (e) => {
+      if (e.button === 2 || e.button === 1 || spacePressed) {
+        isDragging = true;
+        startX = e.clientX - panX;
+        startY = e.clientY - panY;
+        canvas.style.cursor = 'grabbing';
+        e.preventDefault();
+      }
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      const rect = container.getBoundingClientRect();
+      const clientX = e.clientX - rect.left;
+      const clientY = e.clientY - rect.top;
+
+      if (isDragging) {
+        panX = e.clientX - startX;
+        panY = e.clientY - startY;
+        redraw();
+        return;
+      }
+
+      // Compute image pixel coordinates
+      const u = Math.round((clientX - panX) / scale);
+      const v = Math.round((clientY - panY) / scale);
+
+      if (u >= 0 && u < 1920 && v >= 0 && v < 1080) {
+        currentHover = { u, v };
+        document.getElementById('coords-display').innerText = `Камера ${currentCam} | Пиксели: X=${u}, Y=${v} (Зум: ${Math.round(scale * 100)}%)`;
+      }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (isDragging) {
+        isDragging = false;
+        canvas.style.cursor = spacePressed ? 'grab' : 'crosshair';
+      }
+    });
+
+    container.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // Click to place landmark
+    canvas.addEventListener('click', (e) => {
+      if (spacePressed || isDragging) return;
+      const rect = container.getBoundingClientRect();
+      const clientX = e.clientX - rect.left;
+      const clientY = e.clientY - rect.top;
+      const u = Math.round((clientX - panX) / scale);
+      const v = Math.round((clientY - panY) / scale);
+
+      if (u >= 0 && u < 1920 && v >= 0 && v < 1080) {
+        currentClick = { u, v };
+        redraw();
+      }
+    });
+
+    function addCurrentPoint() {
+      if (!currentClick) {
+        alert('Сначала кликни по объекту на кадре!');
+        return;
+      }
+      const name = document.getElementById('landmark-name').value.trim() || 'Без названия';
+      landmarks.push({
+        id: Date.now(),
+        cam: currentCam,
+        name: name,
+        u: currentClick.u,
+        v: currentClick.v
+      });
+      localStorage.setItem('peleng_gcp_landmarks', JSON.stringify(landmarks));
+      currentClick = null;
+      renderPointsList();
+      redraw();
+    }
+
+    function removePoint(id) {
+      landmarks = landmarks.filter(p => p.id !== id);
+      localStorage.setItem('peleng_gcp_landmarks', JSON.stringify(landmarks));
+      renderPointsList();
+      redraw();
+    }
+
+    function clearAll() {
+      if (confirm('Очистить все сохранённые точки?')) {
+        landmarks = [];
+        localStorage.removeItem('peleng_gcp_landmarks');
+        renderPointsList();
+        redraw();
+      }
+    }
+
+    function updatePointName(id, newName) {
+      const pt = landmarks.find(p => p.id === id);
+      if (pt) {
+        pt.name = newName.trim() || 'Без названия';
+        localStorage.setItem('peleng_gcp_landmarks', JSON.stringify(landmarks));
+        document.getElementById('json-output').innerText = JSON.stringify(landmarks, null, 2);
+        redraw();
+      }
+    }
+
+    function renderPointsList() {
+      const containerList = document.getElementById('points-container');
+      containerList.innerHTML = landmarks.map(pt => `
+        <div class="point-item">
+          <span class="point-tag">[Кам ${pt.cam}]</span>
+          <input type="text" class="point-name-edit" value="${pt.name}" oninput="updatePointName(${pt.id}, this.value)" title="Кликни, чтобы изменить имя">
+          <span class="point-coords">(${pt.u}, ${pt.v})</span>
+          <span class="del-btn" title="Удалить" onclick="removePoint(${pt.id})">&times;</span>
+        </div>
+      `).join('');
+      document.getElementById('json-output').innerText = JSON.stringify(landmarks, null, 2);
+    }
+
+    function exportJSON() {
+      navigator.clipboard.writeText(JSON.stringify(landmarks, null, 2)).then(() => {
+        alert('Скопировано в буфер обмена! Вставь в чат.');
+      });
+    }
+
+    function switchCam(id) {
+      currentClick = null;
+      loadCamImage(id);
+    }
+
+    // Auto-resize canvas buffer to match container
+    function resizeCanvas() {
+      canvas.width = container.clientWidth;
+      canvas.height = container.clientHeight;
+      fitToScreen();
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    renderPointsList();
+  </script>
+</body>
+</html>

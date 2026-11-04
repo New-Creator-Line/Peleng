@@ -106,6 +106,12 @@ def _normalize_payload(scene_payload: Dict[str, Any]) -> Dict[str, Any]:
         tree_cloud.setdefault("colors_rgb", [])
         normalized["tree_cloud"] = tree_cloud
 
+    if "landmarks" in scene_payload and scene_payload["landmarks"] is not None:
+        normalized["landmarks"] = list(scene_payload["landmarks"])
+
+    if "terrain_methods" in scene_payload and scene_payload["terrain_methods"] is not None:
+        normalized["terrain_methods"] = dict(scene_payload["terrain_methods"])
+
     return _sanitize_for_json(normalized)
 
 
@@ -653,7 +659,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <button id="btn-open-left" data-toggle="btn-toggle-left" class="hud-reopen-pill left-pill" title="Показать панель камер и слоев">
     ☰ Камеры и Слои
   </button>
-  <button id="btn-open-right" data-toggle="btn-toggle-right" class="hud-reopen-pill right-pill" title="Показать панель телеметрии">
+  <button id="btn-open-right" data-toggle="btn-toggle-right" class="hud-reopen-pill right-pill visible" title="Показать панель телеметрии">
     📊 Телеметрия
   </button>
 
@@ -688,7 +694,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div>
-      <div class="section-title">3D Scene Layers</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div class="section-title" style="margin-bottom:0;">3D Scene Layers</div>
+        <button id="btn-reset-settings" style="background:none;border:none;color:#94a3b8;font-size:11px;cursor:pointer;text-decoration:underline;padding:0;" title="Сбросить все слои и настройки к исходным">Сбросить</button>
+      </div>
       <div class="layer-list">
         <label class="layer-item">
           <span>Photometric Terrain Mesh</span>
@@ -712,6 +721,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         <label class="layer-item">
           <span>3D Roadway</span>
           <input type="checkbox" id="toggle-road" checked />
+        </label>
+        <label class="layer-item" id="row-toggle-landmarks">
+          <span style="color:#10b981;font-weight:600;">🎯 Эталонные деревья (GCP)</span>
+          <input type="checkbox" id="toggle-landmarks" checked />
         </label>
         <label class="layer-item">
           <span>Camera Frustums &amp; Badges</span>
@@ -746,6 +759,23 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
             <option value="vivid">Яркий: Красный / Изумрудный (GT)</option>
           </select>
         </div>
+        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px dashed rgba(56, 189, 248, 0.25);">
+          <div class="section-title" style="margin-bottom: 6px; color: #f8fafc; font-size: 10px;">Сравнение 3 методов рельефа</div>
+          <div class="layer-list" style="gap: 6px;">
+            <label class="layer-item">
+              <span id="label-method-epipolar" style="color:#00f5d4;font-weight:600;">🔵 Метод 1: Epipolar Stereo (Циан)</span>
+              <input type="checkbox" id="toggle-method-epipolar" />
+            </label>
+            <label class="layer-item">
+              <span id="label-method-carving" style="color:#f97316;font-weight:600;">🟠 Метод 2: Space Carving Горы (Оранж)</span>
+              <input type="checkbox" id="toggle-method-carving" />
+            </label>
+            <label class="layer-item">
+              <span id="label-method-depth" style="color:#a855f7;font-weight:600;">🟣 Метод 3: Metric Depth Облако (Фиолетовый)</span>
+              <input type="checkbox" id="toggle-method-depth" />
+            </label>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -764,12 +794,24 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           <span class="legend-swatch" style="background:#38bdf8;"></span>
           <span>Active Camera Line-of-Sight Ray</span>
         </div>
+        <div class="legend-row">
+          <span class="legend-swatch" style="background:#00f5d4;"></span>
+          <span>Метод 1: Epipolar Stereo (Циан)</span>
+        </div>
+        <div class="legend-row">
+          <span class="legend-swatch" style="background:#f97316;"></span>
+          <span>Метод 2: Space Carving Горы (Оранж)</span>
+        </div>
+        <div class="legend-row">
+          <span class="legend-swatch" style="background:#a855f7;"></span>
+          <span>Метод 3: Metric Depth Облако (Фиолетовый)</span>
+        </div>
       </div>
     </div>
   </aside>
 
   <!-- Right Panel: Live Telemetry Readout -->
-  <aside id="hud-right" class="hud-panel">
+  <aside id="hud-right" class="hud-panel collapsed">
     <div class="panel-header-bar">
       <span class="panel-header-title">📊 Телеметрия</span>
       <button id="btn-collapse-right" class="panel-collapse-btn" title="Скрыть панель">[ Скрыть — ]</button>
@@ -998,11 +1040,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     function setLeftPanelCollapsed(collapsed) {
       hudLeft.classList.toggle('collapsed', Boolean(collapsed));
       syncPanelToggleButtons();
+      if (typeof saveViewerSettings === 'function') saveViewerSettings();
     }
 
     function setRightPanelCollapsed(collapsed) {
       hudRight.classList.toggle('collapsed', Boolean(collapsed));
       syncPanelToggleButtons();
+      if (typeof saveViewerSettings === 'function') saveViewerSettings();
     }
 
     function toggleBothSidePanels() {
@@ -1195,6 +1239,133 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     buildPointCloud();
+
+    // 2b. Build 3 Visible-Scene Terrain Reconstruction Methods (Task 018)
+    let methodEpipolarObj = null;
+    let methodCarvingObj = null;
+    let methodDepthObj = null;
+
+    function buildTerrainMethods() {
+      const tm = SCENE_DATA.terrain_methods || {};
+
+      // Method 1: Epipolar Stereo Points (Cyan, size 4.5px)
+      const dataEpipolar = tm.epipolar_stereo || {};
+      const vertsEpipolar = dataEpipolar.vertices || [];
+      if (vertsEpipolar.length > 0) {
+        const n1 = vertsEpipolar.length;
+        const pos1 = new Float32Array(n1 * 3);
+        const col1 = new Float32Array(n1 * 3);
+        for (let i = 0; i < n1; i++) {
+          const v3 = ueToThree(vertsEpipolar[i]);
+          pos1[i * 3] = v3.x;
+          pos1[i * 3 + 1] = v3.y + 0.16;
+          pos1[i * 3 + 2] = v3.z;
+          // Neon cyan #00f5d4
+          col1[i * 3] = 0.0;
+          col1[i * 3 + 1] = 0.96;
+          col1[i * 3 + 2] = 0.83;
+        }
+        const geom1 = new THREE.BufferGeometry();
+        geom1.setAttribute('position', new THREE.BufferAttribute(pos1, 3));
+        geom1.setAttribute('color', new THREE.BufferAttribute(col1, 3));
+        const mat1 = new THREE.PointsMaterial({
+          size: 4.5,
+          vertexColors: true,
+          sizeAttenuation: true,
+          transparent: true,
+          opacity: 0.95
+        });
+        methodEpipolarObj = new THREE.Points(geom1, mat1);
+        scene.add(methodEpipolarObj);
+
+        const lblEp = document.getElementById('label-method-epipolar');
+        if (lblEp) lblEp.textContent = `🔵 Метод 1: Epipolar Stereo (${n1} точек)`;
+      }
+
+      // Method 2: Space Carving Mesh (Orange/Amber with semi-transparent material opacity 0.65)
+      const dataCarving = tm.space_carving || {};
+      const vertsCarving = dataCarving.vertices || [];
+      const facesCarving = dataCarving.faces || [];
+      if (vertsCarving.length > 0) {
+        const n2 = vertsCarving.length;
+        const pos2 = new Float32Array(n2 * 3);
+        for (let i = 0; i < n2; i++) {
+          const v3 = ueToThree(vertsCarving[i]);
+          pos2[i * 3] = v3.x;
+          pos2[i * 3 + 1] = v3.y;
+          pos2[i * 3 + 2] = v3.z;
+        }
+        const geom2 = new THREE.BufferGeometry();
+        geom2.setAttribute('position', new THREE.BufferAttribute(pos2, 3));
+        if (facesCarving.length > 0) {
+          const idx2 = new Uint32Array(facesCarving.length * 3);
+          for (let i = 0; i < facesCarving.length; i++) {
+            idx2[i * 3] = facesCarving[i][0];
+            idx2[i * 3 + 1] = facesCarving[i][1];
+            idx2[i * 3 + 2] = facesCarving[i][2];
+          }
+          geom2.setIndex(new THREE.BufferAttribute(idx2, 1));
+        }
+        geom2.computeVertexNormals();
+
+        const mat2 = new THREE.MeshStandardMaterial({
+          color: 0xf97316, // warm orange/amber
+          roughness: 0.55,
+          metalness: 0.15,
+          transparent: true,
+          opacity: 0.65,
+          side: THREE.DoubleSide,
+          depthWrite: false
+        });
+        methodCarvingObj = new THREE.Mesh(geom2, mat2);
+        scene.add(methodCarvingObj);
+
+        const lblCv = document.getElementById('label-method-carving');
+        if (lblCv) {
+          const kStr = n2 >= 1000 ? `${Math.round(n2 / 1000)}k` : `${n2}`;
+          lblCv.textContent = `🟠 Метод 2: Space Carving Горы (${kStr} вершин)`;
+        }
+      }
+
+      // Method 3: Metric Depth Points (Purple/Violet, size 2.2px)
+      const dataDepth = tm.metric_depth || {};
+      const vertsDepth = dataDepth.vertices || [];
+      if (vertsDepth.length > 0) {
+        const n3 = vertsDepth.length;
+        const pos3 = new Float32Array(n3 * 3);
+        const col3 = new Float32Array(n3 * 3);
+        for (let i = 0; i < n3; i++) {
+          const v3 = ueToThree(vertsDepth[i]);
+          pos3[i * 3] = v3.x;
+          pos3[i * 3 + 1] = v3.y + 0.10;
+          pos3[i * 3 + 2] = v3.z;
+          // Vibrant violet #a855f7
+          col3[i * 3] = 0.659;
+          col3[i * 3 + 1] = 0.333;
+          col3[i * 3 + 2] = 0.969;
+        }
+        const geom3 = new THREE.BufferGeometry();
+        geom3.setAttribute('position', new THREE.BufferAttribute(pos3, 3));
+        geom3.setAttribute('color', new THREE.BufferAttribute(col3, 3));
+        const mat3 = new THREE.PointsMaterial({
+          size: 2.2,
+          vertexColors: true,
+          sizeAttenuation: true,
+          transparent: true,
+          opacity: 0.90
+        });
+        methodDepthObj = new THREE.Points(geom3, mat3);
+        scene.add(methodDepthObj);
+
+        const lblDp = document.getElementById('label-method-depth');
+        if (lblDp) {
+          const kStr = n3 >= 1000 ? `${Math.round(n3 / 1000)}k` : `${n3}`;
+          lblDp.textContent = `🟣 Метод 3: Metric Depth Облако (${kStr} точек)`;
+        }
+      }
+    }
+
+    buildTerrainMethods();
 
     // 3. Build 5 Calibrated Camera Rigs & Frustums (with Dynamic PTZ Support for Cam 5)
     const camerasGroup = new THREE.Group();
@@ -1766,6 +1937,66 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
     buildRoadAndScenery();
 
+    // 4b. Ground Truth Landmarks (GCP Vertical Beacons)
+    const landmarksGroup = new THREE.Group();
+    scene.add(landmarksGroup);
+
+    function buildLandmarks() {
+      const landmarksList = SCENE_DATA.landmarks || [];
+      if (!landmarksList.length) return;
+
+      const beaconHeight = 6.0;
+      const cylinderGeom = new THREE.CylinderGeometry(0.15, 0.2, beaconHeight, 16);
+      const cylinderMat = new THREE.MeshStandardMaterial({
+        color: 0x10b981,
+        emissive: 0x059669,
+        emissiveIntensity: 0.5,
+        roughness: 0.3,
+        metalness: 0.4
+      });
+
+      const sphereGeom = new THREE.SphereGeometry(0.55, 20, 20);
+      const sphereMat = new THREE.MeshStandardMaterial({
+        color: 0xfbbf24,
+        emissive: 0xd97706,
+        emissiveIntensity: 0.85,
+        roughness: 0.25,
+        metalness: 0.5
+      });
+
+      const ringGeom = new THREE.RingGeometry(0.8, 1.4, 24);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x10b981,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.75
+      });
+
+      landmarksList.forEach(lm => {
+        const posThree = ueToThree(lm.position_3d_cm || [0, 0, 0]);
+        const lmGroup = new THREE.Group();
+
+        // 1. Concentric ground target ring flat on the terrain floor
+        const ringMesh = new THREE.Mesh(ringGeom, ringMat);
+        ringMesh.rotation.x = -Math.PI / 2;
+        ringMesh.position.set(posThree.x, posThree.y + 0.05, posThree.z);
+        lmGroup.add(ringMesh);
+
+        // 2. Vertical beacon needle/cylinder: base sitting exactly on the ground posThree
+        const needleMesh = new THREE.Mesh(cylinderGeom, cylinderMat);
+        needleMesh.position.set(posThree.x, posThree.y + beaconHeight / 2, posThree.z);
+        lmGroup.add(needleMesh);
+
+        // 3. Glowing amber/yellow sphere at the top tip (posThree.y + 6.0m)
+        const sphereMesh = new THREE.Mesh(sphereGeom, sphereMat);
+        sphereMesh.position.set(posThree.x, posThree.y + beaconHeight, posThree.z);
+        lmGroup.add(sphereMesh);
+
+        landmarksGroup.add(lmGroup);
+      });
+    }
+    buildLandmarks();
+
     // 5. Dynamic Active Triangulation Rays (Pre-allocated LineSegments Pool)
     const MAX_RAYS = 16;
     const rayPositions = new Float32Array(MAX_RAYS * 2 * 3);
@@ -1806,9 +2037,15 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       // Position & Rotate 3D Truck
       truckMesh.position.copy(estThree);
       truckMesh.rotation.set(0, -headingRad, 0);
+      const estCheck = document.getElementById('toggle-est-traj');
+      if (estCheck) {
+        truckMesh.visible = Boolean(estCheck.checked);
+      }
 
       // Update GT Ghost Marker
-      if (hasGT && frameData.gt_pos_cm && document.getElementById('toggle-gt-traj').checked) {
+      const gtCheck = document.getElementById('toggle-gt-traj');
+      const shouldShowGt = hasGT && Boolean(frameData.gt_pos_cm) && (!gtCheck || gtCheck.checked);
+      if (shouldShowGt) {
         const gtThree = ueToThree(frameData.gt_pos_cm);
         gtGhostGroup.position.copy(gtThree);
         gtGhostGroup.rotation.set(0, -headingRad, 0);
@@ -1987,53 +2224,371 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         }
       }
       updateFrameState(currentFrameIdx);
+      if (typeof saveViewerSettings === 'function') {
+        saveViewerSettings();
+      }
     }
 
     document.querySelectorAll('#camera-presets .hud-btn').forEach(btn => {
       btn.addEventListener('click', () => setCameraPreset(btn.dataset.view));
     });
 
-    // Layer Visibility Event Listeners
-    document.getElementById('toggle-terrain').addEventListener('change', e => {
-      if (terrainMeshObj) terrainMeshObj.visible = e.target.checked;
-    });
-    document.getElementById('toggle-wireframe').addEventListener('change', e => {
-      if (wireframeMeshObj) wireframeMeshObj.visible = e.target.checked;
-    });
-    document.getElementById('toggle-pointcloud').addEventListener('change', e => {
-      if (pointCloudObj) pointCloudObj.visible = e.target.checked;
-    });
-    document.getElementById('slider-pt-size').addEventListener('input', e => {
-      const val = parseFloat(e.target.value);
-      document.getElementById('pt-size-label').textContent = `${val.toFixed(1)} px`;
-      if (pointCloudMaterial) pointCloudMaterial.size = val;
-    });
-    document.getElementById('toggle-road').addEventListener('change', e => {
-      roadGroup.visible = e.target.checked;
-    });
-    document.getElementById('toggle-frustums').addEventListener('change', e => {
-      camerasGroup.visible = e.target.checked;
-      labelsContainer.style.display = e.target.checked ? 'block' : 'none';
-    });
-    document.getElementById('toggle-rays').addEventListener('change', e => {
-      activeRaysLines.visible = e.target.checked;
-    });
-    document.getElementById('toggle-est-traj').addEventListener('change', e => {
-      if (estTrajectoryLine) estTrajectoryLine.visible = e.target.checked;
-    });
-    document.getElementById('toggle-gt-traj').addEventListener('change', e => {
-      if (gtTrajectoryLine) gtTrajectoryLine.visible = e.target.checked;
-      updateFrameState(currentFrameIdx);
-    });
-    document.getElementById('slider-traj-width').addEventListener('input', e => {
-      currentTrajRadius = parseFloat(e.target.value);
-      document.getElementById('traj-width-label').textContent = `${currentTrajRadius.toFixed(2)} m`;
+    // -------------------------------------------------------------
+    // Persistent User Preferences & Startup Synchronization Module
+    // -------------------------------------------------------------
+    const STORAGE_KEY = 'peleng_viewer_settings_v5';
+
+    const DEFAULT_SETTINGS = {
+      layers: {
+        'toggle-terrain': true,
+        'toggle-wireframe': true,
+        'toggle-pointcloud': true,
+        'toggle-road': true,
+        'toggle-landmarks': true,
+        'toggle-frustums': true,
+        'toggle-rays': true,
+        'toggle-est-traj': true,
+        'toggle-gt-traj': true,
+        'toggle-method-epipolar': false,
+        'toggle-method-carving': false,
+        'toggle-method-depth': false
+      },
+      sliders: {
+        'slider-pt-size': 2.6,
+        'slider-traj-width': 0.60
+      },
+      selects: {
+        'select-traj-style': 'contrast',
+        'select-speed': '1'
+      },
+      cameraPreset: 'orbit',
+      panels: {
+        leftCollapsed: false,
+        rightCollapsed: true
+      }
+    };
+
+    function loadViewerSettings() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+        const parsed = JSON.parse(raw);
+        return {
+          layers: Object.assign({}, DEFAULT_SETTINGS.layers, parsed.layers || {}),
+          sliders: Object.assign({}, DEFAULT_SETTINGS.sliders, parsed.sliders || {}),
+          selects: Object.assign({}, DEFAULT_SETTINGS.selects, parsed.selects || {}),
+          cameraPreset: typeof parsed.cameraPreset === 'string' ? parsed.cameraPreset : DEFAULT_SETTINGS.cameraPreset,
+          panels: Object.assign({}, DEFAULT_SETTINGS.panels, parsed.panels || {})
+        };
+      } catch (err) {
+        console.warn('[Viewer3D] Failed to read settings from localStorage:', err);
+        return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+      }
+    }
+
+    function saveViewerSettings() {
+      try {
+        const settings = {
+          layers: {},
+          sliders: {},
+          selects: {},
+          cameraPreset: activeCameraPreset || 'orbit',
+          panels: {
+            leftCollapsed: hudLeft ? hudLeft.classList.contains('collapsed') : false,
+            rightCollapsed: hudRight ? hudRight.classList.contains('collapsed') : false
+          }
+        };
+
+        const layerIds = [
+          'toggle-terrain',
+          'toggle-wireframe',
+          'toggle-pointcloud',
+          'toggle-road',
+          'toggle-landmarks',
+          'toggle-frustums',
+          'toggle-rays',
+          'toggle-est-traj',
+          'toggle-gt-traj',
+          'toggle-method-epipolar',
+          'toggle-method-carving',
+          'toggle-method-depth'
+        ];
+        layerIds.forEach(id => {
+          const el = document.getElementById(id);
+          if (el) settings.layers[id] = Boolean(el.checked);
+        });
+
+        const ptSlider = document.getElementById('slider-pt-size');
+        if (ptSlider) settings.sliders['slider-pt-size'] = parseFloat(ptSlider.value);
+
+        const trajSlider = document.getElementById('slider-traj-width');
+        if (trajSlider) settings.sliders['slider-traj-width'] = parseFloat(trajSlider.value);
+
+        const styleSelect = document.getElementById('select-traj-style');
+        if (styleSelect) settings.selects['select-traj-style'] = styleSelect.value;
+
+        const speedSelect = document.getElementById('select-speed');
+        if (speedSelect) settings.selects['select-speed'] = speedSelect.value;
+
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+      } catch (err) {
+        console.warn('[Viewer3D] Failed to save settings to localStorage:', err);
+      }
+    }
+
+    function syncAllLayersAndControls() {
+      // 1. Terrain Mesh
+      const toggleTerrain = document.getElementById('toggle-terrain');
+      if (terrainMeshObj && toggleTerrain) {
+        terrainMeshObj.visible = Boolean(toggleTerrain.checked);
+      }
+
+      // 2. Wireframe Overlay
+      const toggleWireframe = document.getElementById('toggle-wireframe');
+      if (wireframeMeshObj && toggleWireframe) {
+        wireframeMeshObj.visible = Boolean(toggleWireframe.checked);
+      }
+
+      // 3. Point Cloud
+      const togglePointCloud = document.getElementById('toggle-pointcloud');
+      if (pointCloudObj && togglePointCloud) {
+        pointCloudObj.visible = Boolean(togglePointCloud.checked);
+      }
+      const sliderPt = document.getElementById('slider-pt-size');
+      if (sliderPt) {
+        const ptVal = parseFloat(sliderPt.value);
+        const ptLabel = document.getElementById('pt-size-label');
+        if (ptLabel) ptLabel.textContent = `${ptVal.toFixed(1)} px`;
+        if (pointCloudMaterial) pointCloudMaterial.size = ptVal;
+      }
+
+      // 4. Roadway
+      const toggleRoad = document.getElementById('toggle-road');
+      if (roadGroup && toggleRoad) {
+        roadGroup.visible = Boolean(toggleRoad.checked);
+      }
+
+      // 5. Landmarks (GCP Trees)
+      const toggleLm = document.getElementById('toggle-landmarks');
+      if (landmarksGroup && toggleLm) {
+        landmarksGroup.visible = Boolean(toggleLm.checked);
+      }
+
+      // 6. Camera Frustums & Badges
+      const toggleFrustums = document.getElementById('toggle-frustums');
+      if (toggleFrustums) {
+        if (camerasGroup) camerasGroup.visible = Boolean(toggleFrustums.checked);
+      }
+      if (labelsContainer) {
+        labelsContainer.style.display = (toggleFrustums?.checked || toggleLm?.checked) ? 'block' : 'none';
+      }
+
+      // 7. Live Triangulation Rays
+      const toggleRays = document.getElementById('toggle-rays');
+      if (activeRaysLines && toggleRays) {
+        activeRaysLines.visible = Boolean(toggleRays.checked);
+      }
+
+      // 8. Trajectory Width & Style
+      const sliderTraj = document.getElementById('slider-traj-width');
+      if (sliderTraj) {
+        currentTrajRadius = parseFloat(sliderTraj.value);
+        const trajWidthLabel = document.getElementById('traj-width-label');
+        if (trajWidthLabel) trajWidthLabel.textContent = `${currentTrajRadius.toFixed(2)} m`;
+      }
+      const selectStyle = document.getElementById('select-traj-style');
+      if (selectStyle) {
+        currentTrajStyle = selectStyle.value;
+      }
       rebuildTrajectories(currentTrajRadius, currentTrajStyle);
-    });
-    document.getElementById('select-traj-style').addEventListener('change', e => {
-      currentTrajStyle = e.target.value;
-      rebuildTrajectories(currentTrajRadius, currentTrajStyle);
-    });
+
+      // 9. Predicted Trajectory & AA Truck
+      const toggleEst = document.getElementById('toggle-est-traj');
+      if (toggleEst) {
+        if (estTrajectoryLine) estTrajectoryLine.visible = Boolean(toggleEst.checked);
+        if (truckMesh) truckMesh.visible = Boolean(toggleEst.checked);
+      }
+
+      // 10. Ground Truth Trajectory & Truck Ghost
+      const toggleGt = document.getElementById('toggle-gt-traj');
+      if (toggleGt) {
+        if (gtTrajectoryLine) gtTrajectoryLine.visible = Boolean(toggleGt.checked);
+        if (gtGhostGroup) gtGhostGroup.visible = Boolean(hasGT && toggleGt.checked);
+      }
+
+      // 11. Playback Speed
+      const selectSpeed = document.getElementById('select-speed');
+      if (selectSpeed) {
+        playbackSpeed = parseFloat(selectSpeed.value);
+      }
+
+      // 12. Method 1: Epipolar Stereo Points (Cyan)
+      const toggleEpipolar = document.getElementById('toggle-method-epipolar');
+      if (methodEpipolarObj && toggleEpipolar) {
+        methodEpipolarObj.visible = Boolean(toggleEpipolar.checked);
+      }
+
+      // 13. Method 2: Space Carving Visual Hull Mesh (Orange)
+      const toggleCarving = document.getElementById('toggle-method-carving');
+      if (methodCarvingObj && toggleCarving) {
+        methodCarvingObj.visible = Boolean(toggleCarving.checked);
+      }
+
+      // 14. Method 3: Metric Depth Point Cloud (Purple)
+      const toggleDepth = document.getElementById('toggle-method-depth');
+      if (methodDepthObj && toggleDepth) {
+        methodDepthObj.visible = Boolean(toggleDepth.checked);
+      }
+    }
+
+    function initViewerSettings() {
+      const settings = loadViewerSettings();
+
+      // Apply saved layers to DOM checkboxes
+      if (settings.layers) {
+        Object.keys(settings.layers).forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.checked = Boolean(settings.layers[id]);
+        });
+      }
+
+      // Apply saved sliders to DOM
+      if (settings.sliders) {
+        if (settings.sliders['slider-pt-size'] !== undefined) {
+          const el = document.getElementById('slider-pt-size');
+          if (el) el.value = String(settings.sliders['slider-pt-size']);
+        }
+        if (settings.sliders['slider-traj-width'] !== undefined) {
+          const el = document.getElementById('slider-traj-width');
+          if (el) el.value = String(settings.sliders['slider-traj-width']);
+        }
+      }
+
+      // Apply saved selects to DOM
+      if (settings.selects) {
+        if (settings.selects['select-traj-style'] !== undefined) {
+          const el = document.getElementById('select-traj-style');
+          if (el) el.value = String(settings.selects['select-traj-style']);
+        }
+        if (settings.selects['select-speed'] !== undefined) {
+          const el = document.getElementById('select-speed');
+          if (el) el.value = String(settings.selects['select-speed']);
+        }
+      }
+
+      // Apply panel collapsed states
+      if (settings.panels) {
+        if (hudLeft && settings.panels.leftCollapsed !== undefined) {
+          hudLeft.classList.toggle('collapsed', Boolean(settings.panels.leftCollapsed));
+        }
+        if (hudRight && settings.panels.rightCollapsed !== undefined) {
+          hudRight.classList.toggle('collapsed', Boolean(settings.panels.rightCollapsed));
+        }
+        syncPanelToggleButtons();
+      }
+
+      // Explicitly synchronize Three.js objects with current DOM state
+      syncAllLayersAndControls();
+
+      // Apply camera preset
+      if (settings.cameraPreset && settings.cameraPreset !== 'orbit') {
+        setCameraPreset(settings.cameraPreset);
+      }
+
+      // Bind change listeners to checkboxes
+      const layerIds = [
+        'toggle-terrain',
+        'toggle-wireframe',
+        'toggle-pointcloud',
+        'toggle-road',
+        'toggle-landmarks',
+        'toggle-frustums',
+        'toggle-rays',
+        'toggle-est-traj',
+        'toggle-gt-traj',
+        'toggle-method-epipolar',
+        'toggle-method-carving',
+        'toggle-method-depth'
+      ];
+      layerIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+          el.addEventListener('change', () => {
+            syncAllLayersAndControls();
+            updateFrameState(currentFrameIdx);
+            saveViewerSettings();
+          });
+        }
+      });
+
+      // Bind slider listeners
+      const sliderPt = document.getElementById('slider-pt-size');
+      if (sliderPt) {
+        sliderPt.addEventListener('input', e => {
+          const val = parseFloat(e.target.value);
+          const ptLabel = document.getElementById('pt-size-label');
+          if (ptLabel) ptLabel.textContent = `${val.toFixed(1)} px`;
+          if (pointCloudMaterial) pointCloudMaterial.size = val;
+          saveViewerSettings();
+        });
+      }
+
+      const sliderTraj = document.getElementById('slider-traj-width');
+      if (sliderTraj) {
+        sliderTraj.addEventListener('input', e => {
+          currentTrajRadius = parseFloat(e.target.value);
+          const trajWidthLabel = document.getElementById('traj-width-label');
+          if (trajWidthLabel) trajWidthLabel.textContent = `${currentTrajRadius.toFixed(2)} m`;
+          rebuildTrajectories(currentTrajRadius, currentTrajStyle);
+          saveViewerSettings();
+        });
+      }
+
+      // Bind select listeners
+      const selectStyle = document.getElementById('select-traj-style');
+      if (selectStyle) {
+        selectStyle.addEventListener('change', e => {
+          currentTrajStyle = e.target.value;
+          rebuildTrajectories(currentTrajRadius, currentTrajStyle);
+          saveViewerSettings();
+        });
+      }
+
+      const selectSpeed = document.getElementById('select-speed');
+      if (selectSpeed) {
+        selectSpeed.addEventListener('change', e => {
+          playbackSpeed = parseFloat(e.target.value);
+          saveViewerSettings();
+        });
+      }
+
+      // Reset button listener
+      const btnReset = document.getElementById('btn-reset-settings');
+      if (btnReset) {
+        btnReset.addEventListener('click', () => {
+          try {
+            localStorage.removeItem(STORAGE_KEY);
+          } catch (e) {}
+          Object.keys(DEFAULT_SETTINGS.layers).forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.checked = Boolean(DEFAULT_SETTINGS.layers[id]);
+          });
+          if (sliderPt) sliderPt.value = String(DEFAULT_SETTINGS.sliders['slider-pt-size']);
+          if (sliderTraj) sliderTraj.value = String(DEFAULT_SETTINGS.sliders['slider-traj-width']);
+          if (selectStyle) selectStyle.value = DEFAULT_SETTINGS.selects['select-traj-style'];
+          if (selectSpeed) selectSpeed.value = DEFAULT_SETTINGS.selects['select-speed'];
+
+          if (hudLeft) hudLeft.classList.toggle('collapsed', Boolean(DEFAULT_SETTINGS.panels.leftCollapsed));
+          if (hudRight) hudRight.classList.toggle('collapsed', Boolean(DEFAULT_SETTINGS.panels.rightCollapsed));
+          syncPanelToggleButtons();
+
+          syncAllLayersAndControls();
+          setCameraPreset('orbit');
+          updateFrameState(currentFrameIdx);
+          saveViewerSettings();
+        });
+      }
+    }
 
     // Timeline Transport Event Listeners
     const btnPlay = document.getElementById('btn-play');
@@ -2089,9 +2644,18 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     // Project 3D Camera Badges to 2D Screen Coordinates
     const tempProjVec = new THREE.Vector3();
     function updateCameraBadgesScreenPos() {
+      if (labelsContainer && labelsContainer.style.display === 'none') {
+        return;
+      }
       const w = window.innerWidth;
       const h = window.innerHeight;
+
+      const frustumsVisible = document.getElementById('toggle-frustums')?.checked ?? true;
       Object.values(cameraRigMap).forEach(rig => {
+        if (!frustumsVisible) {
+          rig.badge.style.display = 'none';
+          return;
+        }
         tempProjVec.copy(rig.posThree);
         tempProjVec.y += 4.5;
         tempProjVec.project(camera);
@@ -2113,7 +2677,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    // Initial Frame Setup & Render Loop
+    // Initial Preferences Restoration & Frame Setup
+    initViewerSettings();
     updateFrameState(0);
 
     function animate(now) {
