@@ -435,13 +435,44 @@ def run_pipeline(
     max_frame = max(all_frames)
     print(f"      Total detection frames: {len(all_frames)} (frames 0 to {max_frame})")
 
-    # Distinguish full-body truck detections vs cabin-only detections vs point-mock detections
+    # Distinguish full-body truck detections vs cabin-only vs hybrid (cabin + YOLO26 fallback) vs point-mock
     all_widths = [o.get("w", 0.0) for f_obs in grouped_detections.values() for o in f_obs]
     all_ars = [o.get("w", 0.0) / max(1.0, o.get("h", 1.0)) for f_obs in grouped_detections.values() for o in f_obs]
     med_w = float(np.median(all_widths)) if all_widths else 0.0
     p90_ar = float(np.percentile(all_ars, 90)) if all_ars else 0.0
     is_yolo_bbox = (not is_mock_mode) and (med_w > 120.0) and (p90_ar > 2.2)
-    is_cabin_bbox = (not is_mock_mode) and (not is_yolo_bbox) and (med_w > 30.0)
+    is_hybrid_bbox = (not is_mock_mode) and (30.0 < med_w <= 120.0) and (p90_ar > 2.2)
+    is_cabin_bbox = (not is_mock_mode) and (not is_yolo_bbox) and (30.0 < med_w <= 120.0)
+
+    # In hybrid mode, separate direct cabin observations from fallback full-body YOLO26 observations
+    fallback_yolo_detections: Dict[int, List[Dict[str, float]]] = {}
+    if is_hybrid_bbox:
+        cabin_csv_cand = os.path.join(os.path.dirname(detections_csv or ""), "detections_2d_cabin.csv")
+        if os.path.exists(cabin_csv_cand):
+            cabin_grouped = load_detections(cabin_csv_cand)
+            cabin_keys = {
+                (f_k, int(obs_c["cam_id"]))
+                for f_k, obs_list_c in cabin_grouped.items()
+                for obs_c in obs_list_c
+            }
+            filtered_cabin: Dict[int, List[Dict[str, float]]] = {}
+            for f_k, obs_list_h in grouped_detections.items():
+                for obs_h in obs_list_h:
+                    if (f_k, int(obs_h["cam_id"])) in cabin_keys:
+                        filtered_cabin.setdefault(f_k, []).append(obs_h)
+                    else:
+                        fallback_yolo_detections.setdefault(f_k, []).append(obs_h)
+            grouped_detections = filtered_cabin
+        else:
+            filtered_cabin = {}
+            for f_k, obs_list_h in grouped_detections.items():
+                for obs_h in obs_list_h:
+                    w_h, h_h = obs_h.get("w", 0.0), max(1.0, obs_h.get("h", 1.0))
+                    if w_h <= 145.0 and (w_h / h_h) <= 1.60:
+                        filtered_cabin.setdefault(f_k, []).append(obs_h)
+                    else:
+                        fallback_yolo_detections.setdefault(f_k, []).append(obs_h)
+            grouped_detections = filtered_cabin
 
     print(f"[3/5] Running Multi-view 3D Triangulation & {tracker_type.upper()} Filtering...")
     t_recon_start = time.perf_counter()
