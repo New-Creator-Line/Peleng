@@ -665,15 +665,26 @@ def run_pipeline(
                 tracker.predict()
                 best_single = max(valid_obs, key=lambda x: x["conf"])
                 cam_model = cameras[best_single["cam_id"]].get_model(frame_idx)
+                # Dynamic Kalman vertical state: Z is continuously propagated with vz (vertical velocity)
                 body_z = float(tracker.get_body_position()[2])
-                target_z = float(0.80 * body_z + 0.20 * ref_z_f)
+                target_z = body_z
                 ray_pt = cam_model.project_ray_to_z(best_single["u"], best_single["v"], target_z=target_z)
                 if ray_pt is not None:
                     single_occ = bool(best_single.get("is_occluded", False))
                     noise_scale = 3.5 if single_occ else 1.5
+                    if is_yolo_bbox:
+                        R_cov_single = np.diag([200.0, 200.0, 80.0])
+                    else:
+                        # NVIDIA-style Anisotropic Ray Covariance for Cabin (sharp bearing, soft range)
+                        r_vec = ray_pt - cam_model.loc
+                        r_dir = r_vec / (float(np.linalg.norm(r_vec)) + 1e-9)
+                        sigma_perp = 25.0
+                        sigma_para = 500.0
+                        I3 = np.eye(3, dtype=np.float64)
+                        R_cov_single = (sigma_perp**2) * (I3 - np.outer(r_dir, r_dir)) + (sigma_para**2) * np.outer(r_dir, r_dir)
                     tracker.update_3d_measurement(
                         ray_pt,
-                        R_cov=np.diag([200.0, 200.0, 80.0]),
+                        R_cov=R_cov_single,
                         noise_scale=noise_scale,
                         apply_cabin_shift=is_yolo_bbox,
                         delta_l_cabin=delta_l_cabin,
