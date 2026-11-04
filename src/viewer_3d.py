@@ -1747,15 +1747,15 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       frames.forEach(f => {
         if (f.est_pos_cm) {
           const p = ueToThree(f.est_pos_cm);
-          rawEst.push(new THREE.Vector3(p.x, p.y + 0.55, p.z));
+          rawEst.push(new THREE.Vector3(p.x, p.y, p.z));
           if (!hasGT || !f.gt_pos_cm) {
-            rawRoad.push(new THREE.Vector3(p.x, p.y, p.z));
+            rawRoad.push(new THREE.Vector3(p.x, p.y - 2.80, p.z));
           }
         }
         if (hasGT && f.gt_pos_cm) {
           const g = ueToThree(f.gt_pos_cm);
-          rawGt.push(new THREE.Vector3(g.x, g.y + 0.48, g.z));
-          rawRoad.push(new THREE.Vector3(g.x, g.y, g.z));
+          rawGt.push(new THREE.Vector3(g.x, g.y, g.z));
+          rawRoad.push(new THREE.Vector3(g.x, g.y - 2.80, g.z));
         }
       });
 
@@ -1824,6 +1824,19 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
       geom.computeVertexNormals();
       return geom;
+    }
+
+    function rebuildRoadwayRibbons() {
+      while (roadGroup.children.length > 0) {
+        const obj = roadGroup.children[0];
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) {
+          if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
+          else obj.material.dispose();
+        }
+        roadGroup.remove(obj);
+      }
+      buildRoadAndScenery();
     }
 
     function buildRoadAndScenery() {
@@ -2077,12 +2090,31 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         const camKey = activeCameraPreset.replace('cam_', '');
         const rig = cameraRigMap[camKey];
         if (rig) {
-          const fwdThree = ueDirToThree(rig.currentForward);
-          const upThree = ueDirToThree(rig.currentUp);
+          let lookDir, upDir;
+          if (rig.info.rot_deg) {
+            const r = THREE.MathUtils.degToRad(rig.info.rot_deg[0]);
+            const p = THREE.MathUtils.degToRad(rig.info.rot_deg[1]);
+            const y = THREE.MathUtils.degToRad(rig.info.rot_deg[2]);
+            const forwardUE = [
+              Math.cos(p) * Math.cos(y),
+              Math.cos(p) * Math.sin(y),
+              Math.sin(p)
+            ];
+            lookDir = ueDirToThree(forwardUE);
+            const upUE = [
+              -(Math.cos(r)*Math.sin(p)*Math.cos(y) + Math.sin(r)*Math.sin(y)),
+              -(Math.cos(r)*Math.sin(p)*Math.sin(y) - Math.sin(r)*Math.cos(y)),
+              Math.cos(r)*Math.cos(p)
+            ];
+            upDir = ueDirToThree(upUE);
+          } else {
+            lookDir = ueDirToThree(rig.currentForward);
+            upDir = ueDirToThree(rig.currentUp);
+          }
           camera.position.copy(rig.posThree);
-          camera.up.copy(upThree);
-          camera.lookAt(rig.posThree.clone().add(fwdThree));
-          controls.target.copy(rig.posThree.clone().add(fwdThree.clone().multiplyScalar(80.0)));
+          camera.up.copy(upDir);
+          camera.lookAt(rig.posThree.clone().add(lookDir));
+          controls.target.copy(rig.posThree.clone().add(lookDir.clone().multiplyScalar(50.0)));
 
           // Update PiP Crosshair if active ray exists for this camera
           const rayForCam = activeRays.find(r => String(r.cam_id) === camKey);
@@ -2589,15 +2621,28 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       }
 
       const rawEst = [];
+      const rawRoad = [];
       frames.forEach(f => {
         if (f.est_pos_cm) {
           const p = ueToThree(f.est_pos_cm);
-          rawEst.push(new THREE.Vector3(p.x, p.y + 0.55, p.z));
+          rawEst.push(new THREE.Vector3(p.x, p.y, p.z));
+          if (!hasGT || !f.gt_pos_cm) {
+            rawRoad.push(new THREE.Vector3(p.x, p.y - 2.80, p.z));
+          }
+        }
+        if (hasGT && f.gt_pos_cm) {
+          const g = ueToThree(f.gt_pos_cm);
+          rawRoad.push(new THREE.Vector3(g.x, g.y - 2.80, g.z));
         }
       });
       const cleanEst = deduplicatePoints(rawEst);
       if (cleanEst.length >= 2) {
         estCurve = new THREE.CatmullRomCurve3(cleanEst);
+      }
+      const cleanRoad = deduplicatePoints(rawRoad, 0.25);
+      if (cleanRoad.length >= 2) {
+        roadBaseCurve = new THREE.CatmullRomCurve3(cleanRoad);
+        rebuildRoadwayRibbons();
       }
 
       rebuildTrajectories(currentTrajRadius, currentTrajStyle);
