@@ -51,7 +51,7 @@ def reconstruct_trajectory(
 ) -> pd.DataFrame:
     """Reconstructs 3D cabin trajectory for given camera dictionary and detections."""
     panning_cams = _detect_panning_cameras(cameras)
-    unclipped = _unclip_stationary_occluder_edges(detections_by_frame, panning_cams)
+    unclipped = _unclip_stationary_occluder_edges(detections_by_frame, cameras, panning_cams)
     max_frame = total_frames - 1
     conf_threshold = 0.3
     dt = 1.0 / 30.0
@@ -133,7 +133,7 @@ def compute_geometric_consistency(
     and per-frame 3D Uncertainty Ellipsoid radii (a, b, c) + 2*sigma corridor.
     """
     panning_cams = _detect_panning_cameras(cameras)
-    unclipped = _unclip_stationary_occluder_edges(detections_by_frame, panning_cams)
+    unclipped = _unclip_stationary_occluder_edges(detections_by_frame, cameras, panning_cams)
 
     skew_errors: List[float] = []
     reproj_errors_sq: List[float] = []

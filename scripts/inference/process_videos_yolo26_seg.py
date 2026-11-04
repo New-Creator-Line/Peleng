@@ -427,9 +427,9 @@ def process_videos_yolo26_seg(
     total_time = time.perf_counter() - t_start
     logger.info("Video processing complete in %.2f s (Average speed: %.1f FPS)", total_frames / total_time * 5 if total_time else 0, total_frames / total_time if total_time else 0)
 
+    df = pd.DataFrame(detection_records)
     # Save CSV with semicolon delimiter compatible with main.py pipeline
     if max_frames is None or not Path(csv_output).exists():
-        df = pd.DataFrame(detection_records)
         df.to_csv(csv_output, sep=';', index=False)
         logger.info("Saved %d total detections to: %s", len(df), csv_output)
     else:
