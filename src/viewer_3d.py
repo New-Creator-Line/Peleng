@@ -691,13 +691,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     <div style="margin-bottom: 12px; padding: 10px; background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(0, 245, 212, 0.35); border-radius: 8px;">
       <div class="section-title" style="margin-bottom: 6px; color: #00f5d4; font-size: 11px;">🤖 Выбор Модели и Алгоритма</div>
       <select id="select-active-model" class="speed-select" style="width: 100%; font-size: 11px; padding: 6px 8px; font-weight: 600;">
-        <option value="cabin" selected>🏆 Поколение 4: Cabin Detector + SOTA (1.48 м)</option>
+        <option value="cabin" selected>🏆 Поколение 4: Cabin SOTA + Z-Fix (1.06 м)</option>
         <option value="ukf">⭐ Поколение 3: YOLO26x-seg + 10D UKF (3.51 м)</option>
         <option value="rtdetr">🚀 Поколение 2: RT-DETR + Filter (6.14 м)</option>
         <option value="yolo_linear">📦 Поколение 1: YOLOv8x + Linear (6.30 м)</option>
       </select>
       <div id="model-desc-badge" style="font-size: 10px; color: #94a3b8; margin-top: 6px; line-height: 1.35;">
-        <span style="color:#22c55e;font-weight:700;">Cabin Detector + SOTA</span>: Специализированный детектор кабины, перспективный пивот, UKF. MAE: <b>1.48 м</b> (на мультикамере: <b>0.92 м</b>).
+        <span style="color:#22c55e;font-weight:700;">Cabin SOTA + Z-Fix</span>: Fine-tuned Cabin Detector, NVIDIA Anisotropic Covariance, Dynamic Altitude UKF. MAE: <b>1.06 м (106.2 см)</b>!
       </div>
     </div>
 
@@ -855,19 +855,44 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div>
-      <div class="section-title">Pipeline Accuracy Summary</div>
+      <div class="section-title">Точность модели и текущая разница с эталоном</div>
       <div class="telemetry-grid">
-        <div class="metric-box">
-          <div class="metric-label">MAE_3D (cm / m)</div>
-          <div class="metric-value cyan" id="sum-mae3d">--</div>
+        <!-- 1. Итоговый константный MAE выбранной модели -->
+        <div class="metric-box full-width" style="border: 1px solid rgba(0, 245, 212, 0.4); background: rgba(0, 245, 212, 0.08); padding: 8px 10px;">
+          <div class="metric-label" style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="color:#00f5d4; font-weight:700;">★ ИТОГОВЫЙ MAE_3D (КОНСТАНТА МОДЕЛИ)</span>
+            <span id="active-model-summary-badge" style="font-size:10px; color:#38bdf8; font-weight:600;">Cabin Detector</span>
+          </div>
+          <div class="metric-value cyan" id="sum-mae3d" style="font-size:16px; margin: 3px 0;">--</div>
+          <div style="font-size:10px; color:#94a3b8;">Погрешность текущей модели по всем 1001 кадрам (фиксированная константа)</div>
         </div>
+
+        <!-- 2. Динамическая ошибка в текущем кадре -->
         <div class="metric-box">
-          <div class="metric-label">RMSE_3D (cm / m)</div>
-          <div class="metric-value cyan" id="sum-rmse3d">--</div>
+          <div class="metric-label">ТЕКУЩАЯ РАЗНИЦА (КАДР #<span id="dyn-frame-idx">0</span>)</div>
+          <div class="metric-value amber" id="dyn-instant-err" style="font-size:14px; font-weight:700;">--</div>
         </div>
+
+        <!-- 3. Динамический накопительный MAE до текущего кадра -->
+        <div class="metric-box">
+          <div class="metric-label">НАКОПЛЕННЫЙ MAE (ДО КАДРА)</div>
+          <div class="metric-value cyan" id="dyn-running-mae" style="font-size:14px; font-weight:700;">--</div>
+        </div>
+
+        <!-- 4. Динамическая разница по осям в кадре -->
         <div class="metric-box full-width">
-          <div class="metric-label">Axis MAE (X / Y / Z) [cm]</div>
-          <div class="metric-value" id="sum-axes">--</div>
+          <div class="metric-label">ТЕКУЩАЯ РАЗНИЦА ПО ОСЯМ (ΔX / ΔY / ΔZ) [см]</div>
+          <div class="metric-value" id="dyn-axis-diff" style="font-size:12px; font-family:monospace;">ΔX: -- | ΔY: -- | ΔZ: --</div>
+        </div>
+
+        <!-- 5. Статические константы RMSE и Axis MAE -->
+        <div class="metric-box">
+          <div class="metric-label">ИТОГОВЫЙ RMSE_3D (КОНСТАНТА)</div>
+          <div class="metric-value" id="sum-rmse3d" style="font-size:13px; color:#a5f3fc;">--</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">ИТОГОВЫЙ AXIS MAE (X / Y / Z)</div>
+          <div class="metric-value" id="sum-axes" style="font-size:11px; color:#e2e8f0;">--</div>
         </div>
       </div>
     </div>
@@ -919,6 +944,34 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     const meta = SCENE_DATA.meta || {};
     const metrics = SCENE_DATA.metrics || {};
     let frames = SCENE_DATA.frames || [];
+
+    // Running MAE cache for currently active model frames
+    let runningMaeArray = [];
+    function precomputeRunningMaeForActiveFrames() {
+      if (!frames || frames.length === 0) {
+        runningMaeArray = [];
+        return;
+      }
+      runningMaeArray = new Float32Array(frames.length);
+      let sumErr = 0.0;
+      let count = 0;
+      for (let i = 0; i < frames.length; i++) {
+        const f = frames[i];
+        let err = 0.0;
+        if (typeof f.error_cm === 'number' && !isNaN(f.error_cm)) {
+          err = f.error_cm;
+        } else if (f.est_pos_cm && f.gt_pos_cm) {
+          const dx = f.est_pos_cm[0] - f.gt_pos_cm[0];
+          const dy = f.est_pos_cm[1] - f.gt_pos_cm[1];
+          const dz = f.est_pos_cm[2] - f.gt_pos_cm[2];
+          err = Math.hypot(dx, dy, dz);
+        }
+        sumErr += err;
+        count++;
+        runningMaeArray[i] = sumErr / count;
+      }
+    }
+    precomputeRunningMaeForActiveFrames();
     const camerasData = SCENE_DATA.cameras || {};
     const hasGT = Boolean(meta.has_ground_truth);
     const originCenter = meta.origin_center_cm || [0.0, 0.0, 0.0];
@@ -997,6 +1050,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       } else {
         sumAxesEl.textContent = 'N/A (Blind Test)';
       }
+    }
+
+    const activeKeyInit = SCENE_DATA.active_model || 'cabin';
+    const activeModelInit = (SCENE_DATA.models && SCENE_DATA.models[activeKeyInit]) || null;
+    const badgeInit = document.getElementById('active-model-summary-badge');
+    if (badgeInit && activeModelInit) {
+      badgeInit.textContent = activeModelInit.short_name || activeModelInit.name || activeKeyInit;
     }
 
     // Collapsible Side Panels Logic
@@ -2013,13 +2073,67 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('scrubber-coords-label').textContent =
         `UE5 [m] X: ${(estCm[0] / 100).toFixed(1)}m | Y: ${(estCm[1] / 100).toFixed(1)}m | Z: ${(estCm[2] / 100).toFixed(1)}m`;
 
-      if (hasGT && frameData.gt_pos_cm) {
+      let curErrCm = null;
+      let diffX = 0, diffY = 0, diffZ = 0;
+      let hasDiff = false;
+
+      if (hasGT && frameData.gt_pos_cm && frameData.est_pos_cm) {
         const gtCm = frameData.gt_pos_cm;
+        diffX = frameData.est_pos_cm[0] - gtCm[0];
+        diffY = frameData.est_pos_cm[1] - gtCm[1];
+        diffZ = frameData.est_pos_cm[2] - gtCm[2];
+        curErrCm = Math.hypot(diffX, diffY, diffZ);
+        hasDiff = true;
+
         document.getElementById('tel-gt-pos').textContent =
           `X: ${gtCm[0].toFixed(1)} | Y: ${gtCm[1].toFixed(1)} | Z: ${gtCm[2].toFixed(1)}`;
-        if (typeof frameData.error_cm === 'number') {
-          document.getElementById('tel-err').textContent =
-            `${frameData.error_cm.toFixed(1)} cm (${(frameData.error_cm / 100).toFixed(2)} m)`;
+      } else if (typeof frameData.error_cm === 'number') {
+        curErrCm = frameData.error_cm;
+      }
+
+      const telErrEl = document.getElementById('tel-err');
+      const dynInstErrEl = document.getElementById('dyn-instant-err');
+      const dynFrameIdxEl = document.getElementById('dyn-frame-idx');
+      const dynRunningMaeEl = document.getElementById('dyn-running-mae');
+      const dynAxisDiffEl = document.getElementById('dyn-axis-diff');
+
+      if (dynFrameIdxEl) dynFrameIdxEl.textContent = String(frameData.frame ?? currentFrameIdx);
+
+      if (typeof curErrCm === 'number' && !isNaN(curErrCm)) {
+        const errText = `${curErrCm.toFixed(1)} cm (${(curErrCm / 100).toFixed(2)} m)`;
+        if (telErrEl) telErrEl.textContent = errText;
+        if (dynInstErrEl) {
+          dynInstErrEl.textContent = errText;
+          if (curErrCm < 150) {
+            dynInstErrEl.style.color = '#22c55e';
+          } else if (curErrCm < 300) {
+            dynInstErrEl.style.color = '#fbbf24';
+          } else {
+            dynInstErrEl.style.color = '#f87171';
+          }
+        }
+      } else {
+        if (telErrEl) telErrEl.textContent = 'N/A';
+        if (dynInstErrEl) dynInstErrEl.textContent = 'N/A';
+      }
+
+      if (dynRunningMaeEl) {
+        const rMae = (runningMaeArray && runningMaeArray.length > currentFrameIdx) ? runningMaeArray[currentFrameIdx] : null;
+        if (typeof rMae === 'number' && !isNaN(rMae)) {
+          dynRunningMaeEl.textContent = `${rMae.toFixed(1)} cm (${(rMae / 100).toFixed(2)} m)`;
+        } else {
+          dynRunningMaeEl.textContent = 'N/A';
+        }
+      }
+
+      if (dynAxisDiffEl) {
+        if (hasDiff) {
+          const sX = (diffX >= 0 ? '+' : '') + diffX.toFixed(1);
+          const sY = (diffY >= 0 ? '+' : '') + diffY.toFixed(1);
+          const sZ = (diffZ >= 0 ? '+' : '') + diffZ.toFixed(1);
+          dynAxisDiffEl.textContent = `ΔX: ${sX} | ΔY: ${sY} | ΔZ: ${sZ} cm`;
+        } else {
+          dynAxisDiffEl.textContent = 'N/A (Blind Test)';
         }
       }
 

@@ -929,10 +929,10 @@ def build_scene_3d_payload(
     known_specs = [
         {
             "id": "cabin",
-            "name": "🏆 Поколение 4: Cabin Detector + SOTA (1.48 м)",
-            "short_name": "Cabin Detector + SOTA",
+            "name": "🏆 Поколение 4: Cabin SOTA + Z-Fix (1.06 м)",
+            "short_name": "Cabin SOTA + Z-Fix",
             "badge": "Поколение 4 (Абсолютный Рекорд)",
-            "desc": "Специализированный детектор кабины + перспективный пивот + UKF. MAE: 1.48 м (на участке кабины: 0.92 м!).",
+            "desc": "Fine-tuned Cabin Detector + NVIDIA Anisotropic Ray Covariance + Dynamic Altitude UKF. MAE: 1.06 м (106.2 см)!",
             "color": "#22c55e",
             "traj_csv": os.path.join(repo_root, "results", "trajectories", "output_trajectory_cabin.csv"),
             "metrics_json": os.path.join(repo_root, "results", "metrics", "metrics_summary_cabin.json"),
