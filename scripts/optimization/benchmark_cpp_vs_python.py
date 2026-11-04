@@ -157,3 +157,4 @@ if __name__ == "__main__":
     print(f"   - C++20 Accelerated:     {res_e2e['time_cpp_ms']:.2f} ms")
     print(f"   -> Ускорение пайплайна:  {res_e2e['speedup']:.2f}x быстрее!")
     print("=" * 65)
+
