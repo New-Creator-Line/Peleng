@@ -354,8 +354,8 @@ def run_pipeline(
             dv = raw_xyz[f1, :2] - raw_xyz[f0, :2]
             dn = float(np.linalg.norm(dv))
             if dn > 10.0:
-                shifted_xyz[f_i, 0] += (dv[0] / dn) * 1100.0
-                shifted_xyz[f_i, 1] += (dv[1] / dn) * 1100.0
+                shifted_xyz[f_i, 0] += (dv[0] / dn) * 1120.0
+                shifted_xyz[f_i, 1] += (dv[1] / dn) * 1120.0
                 shifted_xyz[f_i, 2] -= 80.0
         out_df["Loc_X"] = np.round(shifted_xyz[:, 0], 4)
         out_df["Loc_Y"] = np.round(shifted_xyz[:, 1], 4)

@@ -112,13 +112,13 @@ class UKF10DTracker:
         self.Q[1, 3] = dt3 * var_a
         self.Q[3, 1] = dt3 * var_a
 
-        # Vertical motion
+        # Vertical motion (rank-1 PSD block)
         self.Q[2, 2] = dt4 * var_az
         self.Q[6, 6] = dt2 * var_az
         self.Q[2, 6] = dt3 * var_az
         self.Q[6, 2] = dt3 * var_az
 
-        # Yaw and turn rate
+        # Yaw and turn rate (rank-1 PSD block)
         self.Q[4, 4] = dt4 * var_omega_dot
         self.Q[5, 5] = dt2 * var_omega_dot
         self.Q[4, 5] = dt3 * var_omega_dot
@@ -224,7 +224,7 @@ class UKF10DTracker:
         X, Y, Z, v, psi, omega, vz, L, W, H = sigma_point
         out = np.zeros(10, dtype=np.float64)
 
-        if abs(omega) > 1e-3:
+        if abs(omega) > 1e-5:
             d_psi = omega * dt
             new_psi = psi + d_psi
             out[0] = X + (v / omega) * (math.sin(new_psi) - math.sin(psi))
@@ -290,6 +290,7 @@ class UKF10DTracker:
 
         self.x = x_pred
         self.P = P_pred
+        self.coast_frames += 1
 
         # Cache step for RTS
         self._current_step_prior = (x_pred.copy(), P_pred.copy(), P_x_xpred.copy())
@@ -350,6 +351,7 @@ class UKF10DTracker:
         except np.linalg.LinAlgError:
             return False
 
+        weight = 1.0
         if d_m2 > chi2_thresh:
             weight = math.sqrt(chi2_thresh / d_m2)
             y = y * weight
@@ -384,6 +386,11 @@ class UKF10DTracker:
         Directly adjusts dimensions (L, W, H) and depth along the camera ray.
         """
         if not self.is_initialized or is_truncated:
+            return False
+
+        # Verify nominal cuboid visibility before evaluating sigma points
+        nom_cuboid = TruckCuboid3D.from_state_10d(self.x)
+        if project_cuboid_to_camera_bbox(nom_cuboid, cam_model) is None:
             return False
 
         z = np.array([u, v, w, h], dtype=np.float64)
@@ -431,6 +438,7 @@ class UKF10DTracker:
         except np.linalg.LinAlgError:
             return False
 
+        weight = 1.0
         if d_m2 > chi2_thresh:
             weight = math.sqrt(chi2_thresh / d_m2)
             y = y * weight
@@ -448,8 +456,12 @@ class UKF10DTracker:
 
         # Update covariance without distorting position/heading blocks
         K_dim = K[7:10, :]
-        self.P[7:10, 7:10] -= (K_dim @ S @ K_dim.T)
+        self.P[7:10, 7:10] -= weight * (K_dim @ S @ K_dim.T)
         self.P[7:10, 7:10] = 0.5 * (self.P[7:10, 7:10] + self.P[7:10, 7:10].T)
+
+        # Enforce strict decoupling between dimensions and kinematics
+        self.P[0:7, 7:10] = 0.0
+        self.P[7:10, 0:7] = 0.0
 
         self.coast_frames = 0
         return True

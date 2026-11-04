@@ -12,10 +12,21 @@ Features:
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Auto-configure TensorRT DLL search paths on Windows
+for trt_cand in [r"C:\TensorRT\TensorRT-11.4.0.106\bin", r"C:\TensorRT\TensorRT-11.4.0.106\lib"]:
+    if os.path.isdir(trt_cand) and trt_cand not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = trt_cand + os.pathsep + os.environ.get("PATH", "")
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(trt_cand)
+            except Exception:
+                pass
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -194,6 +205,8 @@ def process_videos_yolo26_seg(
     imgsz: int = 1024,
     device: str = "0",
     max_frames: Optional[int] = None,
+    save_videos: bool = True,
+    only_dashboard: bool = False,
 ) -> Dict[str, Any]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +222,10 @@ def process_videos_yolo26_seg(
             raise FileNotFoundError(f"Model weights not found at {weights_path} or {fallback}")
 
     logger.info("Loading fine-tuned YOLO26x-seg from: %s", wt_path.resolve())
-    model = YOLO(str(wt_path))
+    if wt_path.suffix == ".engine":
+        model = YOLO(str(wt_path), task="segment")
+    else:
+        model = YOLO(str(wt_path))
 
     # Optional 3D Trajectory for HUD overlay
     cam_models = None
@@ -250,20 +266,23 @@ def process_videos_yolo26_seg(
     logger.info("Streams opened: %dx%d @ %.1f FPS | Total Frames to Process: %d", w_orig, h_orig, fps, total_frames)
 
     # 4. Initialize Video Writers
-    # H.264 / mp4v codec
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writers: Dict[int, cv2.VideoWriter] = {}
     out_paths: Dict[int, Path] = {}
-    for c_id in range(1, 6):
-        p = out_dir / f"camera_{c_id}_yolo26_seg.mp4"
-        writers[c_id] = cv2.VideoWriter(str(p), fourcc, fps, (w_orig, h_orig))
-        out_paths[c_id] = p
-
-    # Multi-view dashboard: 3 cols x 2 rows (each tile 640x360 -> total 1920x720)
+    dashboard_writer: Optional[cv2.VideoWriter] = None
     tile_w, tile_h = 640, 360
-    dashboard_w, dashboard_h = 1920, 720
     dashboard_path = out_dir / "multiview_dashboard_yolo26_seg.mp4"
-    dashboard_writer = cv2.VideoWriter(str(dashboard_path), fourcc, fps, (dashboard_w, dashboard_h))
+
+    if save_videos:
+        if not only_dashboard:
+            for c_id in range(1, 6):
+                p = out_dir / f"camera_{c_id}_yolo26_seg.mp4"
+                writers[c_id] = cv2.VideoWriter(str(p), fourcc, fps, (w_orig, h_orig))
+                out_paths[c_id] = p
+
+        # Multi-view dashboard: 3 cols x 2 rows (each tile 640x360 -> total 1920x720)
+        dashboard_w, dashboard_h = 1920, 720
+        dashboard_writer = cv2.VideoWriter(str(dashboard_path), fourcc, fps, (dashboard_w, dashboard_h))
 
     detection_records: List[Dict[str, Any]] = []
     t_start = time.perf_counter()
@@ -285,13 +304,16 @@ def process_videos_yolo26_seg(
 
             # Batch predict on all 5 camera frames in a single GPU forward pass
             frames_list = [raw_frames[c_id] for c_id in range(1, 6)]
-            results = model.predict(
-                source=frames_list,
-                conf=conf_threshold,
-                imgsz=imgsz,
-                device=device,
-                verbose=False,
-            )
+            predict_kwargs: Dict[str, Any] = {
+                "source": frames_list,
+                "conf": conf_threshold,
+                "imgsz": imgsz,
+                "device": device,
+                "verbose": False,
+            }
+            if wt_path.suffix == ".engine":
+                predict_kwargs["rect"] = False
+            results = model.predict(**predict_kwargs)
 
             cam_stats: Dict[int, Optional[Dict[str, Any]]] = {c: None for c in range(1, 6)}
             annotated_tiles: Dict[int, np.ndarray] = {}
@@ -366,50 +388,53 @@ def process_videos_yolo26_seg(
                     }
                     n_dets += 1
 
-                # Draw 3D Cuboid & Uncertainty Ellipsoid HUD if available
-                if traj_dict is not None and cam_models is not None and f_idx in traj_dict and c_id in cam_models:
-                    tr = traj_dict[f_idx]
-                    yaw = float(tr.get("Yaw", 0.0))
-                    length = float(tr.get("Length", 629.0))
-                    width = float(tr.get("Width", 207.0))
-                    height = float(tr.get("Height", 212.0))
-                    cuboid = TruckCuboid3D(
-                        x=float(tr["Loc_X"]),
-                        y=float(tr["Loc_Y"]),
-                        z=float(tr["Loc_Z"]),
-                        yaw=yaw,
-                        length=length,
-                        width=width,
-                        height=height,
-                    )
-                    cam_m = cam_models[c_id].get_model(f_idx)
-                    draw_cuboid_wireframe_hud(frame, cuboid, cam_m)
-                    if "Sigma_X" in tr and "Sigma_Y" in tr and "Sigma_Z" in tr:
-                        cov = np.diag([float(tr["Sigma_X"]) ** 2, float(tr["Sigma_Y"]) ** 2, float(tr["Sigma_Z"]) ** 2])
-                        ellipsoid = compute_uncertainty_ellipsoid_3d(cov, center=cuboid.get_centroid())
-                        draw_uncertainty_ellipsoid_hud(frame, ellipsoid, cam_m)
+                if save_videos:
+                    # Draw 3D Cuboid & Uncertainty Ellipsoid HUD if available
+                    if traj_dict is not None and cam_models is not None and f_idx in traj_dict and c_id in cam_models:
+                        tr = traj_dict[f_idx]
+                        yaw = float(tr.get("Yaw", 0.0))
+                        length = float(tr.get("Length", 629.0))
+                        width = float(tr.get("Width", 207.0))
+                        height = float(tr.get("Height", 212.0))
+                        cuboid = TruckCuboid3D(
+                            x=float(tr["Loc_X"]),
+                            y=float(tr["Loc_Y"]),
+                            z=float(tr["Loc_Z"]),
+                            yaw=yaw,
+                            length=length,
+                            width=width,
+                            height=height,
+                        )
+                        cam_m = cam_models[c_id].get_model(f_idx)
+                        draw_cuboid_wireframe_hud(frame, cuboid, cam_m)
+                        if "Sigma_X" in tr and "Sigma_Y" in tr and "Sigma_Z" in tr:
+                            cov = np.diag([float(tr["Sigma_X"]) ** 2, float(tr["Sigma_Y"]) ** 2, float(tr["Sigma_Z"]) ** 2])
+                            ellipsoid = compute_uncertainty_ellipsoid_3d(cov, center=cuboid.get_centroid())
+                            draw_uncertainty_ellipsoid_hud(frame, ellipsoid, cam_m)
 
-                # Draw top HUD
-                draw_hud_header(frame, c_id, f_idx, total_frames, n_dets)
+                    # Draw top HUD
+                    draw_hud_header(frame, c_id, f_idx, total_frames, n_dets)
 
-                # Write individual full-res video
-                writers[c_id].write(frame)
+                    # Write individual full-res video
+                    if c_id in writers:
+                        writers[c_id].write(frame)
 
-                # Downscale for dashboard tile
-                tile = cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
-                annotated_tiles[c_id] = tile
+                    # Downscale for dashboard tile
+                    tile = cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_LINEAR)
+                    annotated_tiles[c_id] = tile
 
-            # Build 6th tile (Telemetry Status Pane)
-            telemetry_tile = draw_telemetry_tile(tile_w, tile_h, f_idx, total_frames, cam_stats, fps)
+            if save_videos and dashboard_writer is not None:
+                # Build 6th tile (Telemetry Status Pane)
+                telemetry_tile = draw_telemetry_tile(tile_w, tile_h, f_idx, total_frames, cam_stats, fps)
 
-            # Assemble 3x2 grid:
-            # Row 1: Cam 1 | Cam 2 | Cam 3
-            # Row 2: Cam 4 | Cam 5 | Telemetry
-            row1 = np.hstack([annotated_tiles[1], annotated_tiles[2], annotated_tiles[3]])
-            row2 = np.hstack([annotated_tiles[4], annotated_tiles[5], telemetry_tile])
-            dashboard_frame = np.vstack([row1, row2])
+                # Assemble 3x2 grid:
+                # Row 1: Cam 1 | Cam 2 | Cam 3
+                # Row 2: Cam 4 | Cam 5 | Telemetry
+                row1 = np.hstack([annotated_tiles[1], annotated_tiles[2], annotated_tiles[3]])
+                row2 = np.hstack([annotated_tiles[4], annotated_tiles[5], telemetry_tile])
+                dashboard_frame = np.vstack([row1, row2])
 
-            dashboard_writer.write(dashboard_frame)
+                dashboard_writer.write(dashboard_frame)
 
             if (f_idx + 1) % 100 == 0 or (f_idx + 1) == total_frames:
                 elapsed = time.perf_counter() - t_start
@@ -422,14 +447,15 @@ def process_videos_yolo26_seg(
             cap.release()
         for w in writers.values():
             w.release()
-        dashboard_writer.release()
+        if dashboard_writer is not None:
+            dashboard_writer.release()
 
     total_time = time.perf_counter() - t_start
-    logger.info("Video processing complete in %.2f s (Average speed: %.1f FPS)", total_frames / total_time * 5 if total_time else 0, total_frames / total_time if total_time else 0)
+    logger.info("Video processing complete in %.2f s (Average speed: %.1f FPS)", total_time, (total_frames * 5) / total_time if total_time else 0.0)
 
     # Save CSV with semicolon delimiter compatible with main.py pipeline
+    df = pd.DataFrame(detection_records)
     if max_frames is None or not Path(csv_output).exists():
-        df = pd.DataFrame(detection_records)
         df.to_csv(csv_output, sep=';', index=False)
         logger.info("Saved %d total detections to: %s", len(df), csv_output)
     else:
@@ -447,7 +473,15 @@ def process_videos_yolo26_seg(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process multi-camera videos with YOLO26x-seg")
-    parser.add_argument("--weights", default="weights/finetuned/peleng_yolo26x_seg_roboflow_best.pt")
+    # Prefer ultra-fast TensorRT engine of clean_best, fallback to clean_polish .pt
+    default_weights = "weights/finetuned/peleng_yolo26x_seg_clean_best.engine"
+    if not Path(default_weights).exists():
+        default_weights = "weights/finetuned/peleng_yolo26x_seg_clean_best.onnx"
+    if not Path(default_weights).exists():
+        default_weights = "weights/finetuned/peleng_yolo26x_seg_clean_polish_best.pt"
+    if not Path(default_weights).exists():
+        default_weights = "weights/finetuned/peleng_yolo26x_seg_roboflow_best.pt"
+    parser.add_argument("--weights", default=default_weights)
     parser.add_argument("--videos-dir", default="data/raw/hackathon")
     parser.add_argument("--output-dir", default="results/videos")
     parser.add_argument("--csv-output", default="results/detections/detections_2d_yolo26_seg.csv")
@@ -456,6 +490,8 @@ def parse_args():
     parser.add_argument("--imgsz", type=int, default=1024)
     parser.add_argument("--device", default="0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--max-frames", type=int, default=None, help="Limit frames to process for quick preview")
+    parser.add_argument("--skip-videos", action="store_true", help="Skip video generation, only extract 2D detections CSV")
+    parser.add_argument("--only-dashboard", action="store_true", help="Only generate multi-view dashboard video, skip individual camera videos")
     return parser.parse_args()
 
 
@@ -471,4 +507,6 @@ if __name__ == "__main__":
         imgsz=args.imgsz,
         device=args.device,
         max_frames=args.max_frames,
+        save_videos=not args.skip_videos,
+        only_dashboard=args.only_dashboard,
     )
