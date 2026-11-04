@@ -48,6 +48,7 @@ class TrainingConfig:
     erasing: float = 0.4      # Cutout / random erasing to simulate foliage occlusions
     mosaic: float = 1.0
     mixup: float = 0.1
+    warmup_epochs: float = 3.0 # Warmup duration in epochs
     cache: str = "ram"        # Fully cache dataset in RAM
     nbs: int = 64             # Nominal batch size for automatic gradient accumulation
     freeze: Optional[int] = 10  # Freeze 10 backbone layers by default to preserve COCO weights & stabilize BN
@@ -104,6 +105,7 @@ def train_yolo26_seg(cfg: TrainingConfig) -> Dict[str, Any]:
         "erasing": cfg.erasing,
         "mosaic": cfg.mosaic,
         "mixup": cfg.mixup,
+        "warmup_epochs": cfg.warmup_epochs,
         "cache": cfg.cache,
         "nbs": cfg.nbs,
         "project": cfg.project,
@@ -113,6 +115,13 @@ def train_yolo26_seg(cfg: TrainingConfig) -> Dict[str, Any]:
     }
     if cfg.freeze is not None:
         train_args["freeze"] = cfg.freeze
+    if cfg.mosaic == 0.0:
+        # Zero noise / clean polish mode
+        train_args["hsv_h"] = 0.0
+        train_args["hsv_s"] = 0.0
+        train_args["hsv_v"] = 0.0
+        train_args["fliplr"] = 0.0
+        train_args["auto_augment"] = None
 
     results = model.train(**train_args)
 
@@ -154,12 +163,16 @@ def parse_args() -> TrainingConfig:
     parser.add_argument("--device", default="0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--close-mosaic", type=int, default=10)
     parser.add_argument("--erasing", type=float, default=0.4)
+    parser.add_argument("--mosaic", type=float, default=1.0)
+    parser.add_argument("--mixup", type=float, default=0.1)
+    parser.add_argument("--warmup-epochs", type=float, default=3.0)
     parser.add_argument("--cache", default="ram", choices=["ram", "disk", "False", "True"])
     parser.add_argument("--nbs", type=int, default=64, help="Nominal batch size for gradient accumulation")
     parser.add_argument("--freeze", type=int, default=10, help="Number of backbone layers to freeze to stabilize BN")
     parser.add_argument("--patience", type=int, default=0, help="Early stopping patience (0 to disable)")
     parser.add_argument("--lr0", type=float, default=0.001, help="Initial learning rate")
     parser.add_argument("--name", default="peleng_yolo26x_seg_roboflow", help="Experiment run name")
+    parser.add_argument("--clean-polish", action="store_true", help="Zero-augmentation clean polishing mode")
     args = parser.parse_args()
 
     cache_val: Any = args.cache
@@ -168,22 +181,47 @@ def parse_args() -> TrainingConfig:
     elif cache_val == "False":
         cache_val = False
 
-    best_name = f"{args.name}_best.pt"
+    # Apply clean polish overrides if requested
+    epochs = args.epochs
+    lr0 = args.lr0
+    mosaic = args.mosaic
+    mixup = args.mixup
+    erasing = args.erasing
+    warmup_epochs = args.warmup_epochs
+    close_mosaic = args.close_mosaic
+    name = args.name
+
+    if args.clean_polish:
+        logger.info("Applying CLEAN POLISH presets: zero augmentations, zero warmup spike, ultra-low LR.")
+        mosaic = 0.0
+        mixup = 0.0
+        erasing = 0.0
+        warmup_epochs = 0.0
+        close_mosaic = 0
+        lr0 = 0.00005 if args.lr0 == 0.001 else args.lr0
+        epochs = 15 if args.epochs == 40 else args.epochs
+        if args.name == "peleng_yolo26x_seg_roboflow":
+            name = "peleng_yolo26x_seg_clean_polish"
+
+    best_name = f"{name}_best.pt"
     return TrainingConfig(
         data_yaml=args.data,
         model_name=args.model,
-        epochs=args.epochs,
+        epochs=epochs,
         batch_size=args.batch,
         imgsz=args.imgsz,
         device=args.device,
-        close_mosaic=args.close_mosaic,
-        erasing=args.erasing,
+        close_mosaic=close_mosaic,
+        erasing=erasing,
+        mosaic=mosaic,
+        mixup=mixup,
+        warmup_epochs=warmup_epochs,
         cache=cache_val,
         nbs=args.nbs,
         freeze=args.freeze,
         patience=args.patience,
-        lr0=args.lr0,
-        name=args.name,
+        lr0=lr0,
+        name=name,
         best_weight_name=best_name,
     )
 
