@@ -67,7 +67,12 @@ def load_detections(detections_csv_path: str) -> Dict[int, List[Dict[str, float]
     Loads 2D detections and groups them by frame.
     Returns: {frame_idx: [{'cam_id': int, 'u': float, 'v': float, 'w': float, 'h': float, 'conf': float}]}
     """
-    df = pd.read_csv(detections_csv_path, sep=';')
+    try:
+        df = pd.read_csv(detections_csv_path, sep=';')
+        if 'Frame' not in df.columns:
+            df = pd.read_csv(detections_csv_path, sep=',')
+    except Exception:
+        df = pd.read_csv(detections_csv_path, sep=',')
     grouped: Dict[int, List[Dict[str, float]]] = {}
 
     for _, row in df.iterrows():

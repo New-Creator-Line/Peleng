@@ -80,6 +80,94 @@ def compute_mask_moments(
     return u_c, v_c, w_px, h_px, is_truncated
 
 
+def suppress_nested_detections(
+    detections: List[DetectionResult],
+    iomin_threshold: float = 0.50,
+) -> List[DetectionResult]:
+    """
+    Suppresses nested / duplicate detections where a smaller sub-part (e.g. cabin)
+    is geometrically enclosed inside a larger bounding box (e.g. whole truck).
+
+    If IoMin = Area(intersection) / min(Area(A), Area(B)) >= iomin_threshold,
+    the smaller box is suppressed, the larger enclosing box is retained,
+    and the retained box's confidence is set to max(conf_large, conf_small).
+    """
+    if len(detections) <= 1:
+        return detections
+
+    # Calculate bounding box coordinates and areas for each detection
+    boxes = []
+    for d in detections:
+        x1 = d.u - d.w / 2.0
+        y1 = d.v - d.h / 2.0
+        x2 = d.u + d.w / 2.0
+        y2 = d.v + d.h / 2.0
+        area = max(1.0, d.w * d.h)
+        boxes.append([x1, y1, x2, y2, area, d.conf])
+
+    boxes_arr = np.array(boxes, dtype=np.float64)
+    # Sort by area descending (largest box first)
+    order = list(np.argsort(-boxes_arr[:, 4]))
+
+    retained_indices: List[int] = []
+    updated_confs = {i: detections[i].conf for i in range(len(detections))}
+
+    while len(order) > 0:
+        curr_idx = order[0]
+        retained_indices.append(curr_idx)
+        if len(order) == 1:
+            break
+
+        remaining = order[1:]
+        surviving = []
+        b_curr = boxes_arr[curr_idx]
+
+        for rem_idx in remaining:
+            b_rem = boxes_arr[rem_idx]
+            # Compute axis-aligned intersection
+            ix1 = max(b_curr[0], b_rem[0])
+            iy1 = max(b_curr[1], b_rem[1])
+            ix2 = min(b_curr[2], b_rem[2])
+            iy2 = min(b_curr[3], b_rem[3])
+            iw = max(0.0, ix2 - ix1)
+            ih = max(0.0, iy2 - iy1)
+            inter = iw * ih
+            min_area = min(b_curr[4], b_rem[4])
+            iomin = inter / min_area if min_area > 0 else 0.0
+
+            if iomin >= iomin_threshold:
+                # b_rem is geometrically nested inside b_curr!
+                # Suppress b_rem, absorb its confidence if higher
+                updated_confs[curr_idx] = max(updated_confs[curr_idx], detections[rem_idx].conf)
+            else:
+                surviving.append(rem_idx)
+
+        order = surviving
+
+    # Reconstruct filtered DetectionResult list maintaining original order
+    cleaned: List[DetectionResult] = []
+    for idx in sorted(retained_indices):
+        orig = detections[idx]
+        new_conf = round(float(updated_confs[idx]), 4)
+        if new_conf != orig.conf:
+            cleaned.append(DetectionResult(
+                cam_id=orig.cam_id,
+                u=orig.u,
+                v=orig.v,
+                w=orig.w,
+                h=orig.h,
+                conf=new_conf,
+                polygon=orig.polygon,
+                is_truncated=orig.is_truncated,
+                class_id=orig.class_id,
+                class_name=orig.class_name,
+            ))
+        else:
+            cleaned.append(orig)
+
+    return cleaned
+
+
 class YOLO26SegmentationDetector:
     """
     Production detector using YOLO26-seg (with fallback to YOLO11-seg).
@@ -93,11 +181,15 @@ class YOLO26SegmentationDetector:
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         target_class_names: Optional[List[str]] = None,
+        filter_nested: bool = True,
+        iomin_threshold: float = 0.50,
     ) -> None:
         self.model_name = model_name
         self.device = device
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
+        self.filter_nested = filter_nested
+        self.iomin_threshold = iomin_threshold
 
         # Target class resolution
         self.target_class_names = [c.lower() for c in (target_class_names or ["truck"])]
@@ -217,6 +309,12 @@ class YOLO26SegmentationDetector:
                         class_id=cls_id,
                         class_name=cls_name,
                     ))
+
+                # Filter nested sub-parts (e.g. cabin detected inside full truck)
+                if self.filter_nested and len(frame_dets) > 1:
+                    frame_dets = suppress_nested_detections(
+                        frame_dets, iomin_threshold=self.iomin_threshold
+                    )
 
             batch_detections.append(frame_dets)
 

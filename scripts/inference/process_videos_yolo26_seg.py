@@ -28,7 +28,7 @@ import pandas as pd
 import torch
 from ultralytics import YOLO
 
-from src.detector import compute_mask_moments
+from src.detector import compute_mask_moments, suppress_nested_detections, DetectionResult
 
 logging.basicConfig(
     level=logging.INFO,
@@ -285,6 +285,7 @@ def process_videos_yolo26_seg(
                 frame = raw_frames[c_id]
                 res = results[idx]
                 n_dets = 0
+                cam_candidates: List[DetectionResult] = []
 
                 if res.boxes is not None and len(res.boxes) > 0:
                     for b_idx in range(len(res.boxes)):
@@ -306,27 +307,49 @@ def process_videos_yolo26_seg(
 
                         u_c, v_c, w_px, h_px, is_trunc = compute_mask_moments(poly, img_w=w_orig, img_h=h_orig)
 
-                        # Draw styling
-                        draw_styled_segmentation(frame, poly, tuple(xyxy), conf, u_c, v_c, is_trunc, cam_id=c_id)
+                        cam_candidates.append(DetectionResult(
+                            cam_id=c_id,
+                            u=round(float(u_c), 2),
+                            v=round(float(v_c), 2),
+                            w=round(float(w_px), 2),
+                            h=round(float(h_px), 2),
+                            conf=round(float(conf), 4),
+                            polygon=poly,
+                            is_truncated=is_trunc,
+                            class_id=cls_id,
+                            class_name="truck",
+                        ))
 
-                        detection_records.append({
-                            "Frame": f_idx,
-                            "Cam_ID": c_id,
-                            "u": round(float(u_c), 2),
-                            "v": round(float(v_c), 2),
-                            "w": round(float(w_px), 2),
-                            "h": round(float(h_px), 2),
-                            "conf": round(float(conf), 4),
-                            "is_truncated": 1 if is_trunc else 0,
-                            "num_poly_pts": len(poly),
-                        })
-                        cam_stats[c_id] = {
-                            "conf": conf,
-                            "u": u_c,
-                            "v": v_c,
-                            "is_trunc": is_trunc,
-                        }
-                        n_dets += 1
+                # Suppress nested sub-parts (e.g. smaller cabin box inside full truck box)
+                surviving_dets = suppress_nested_detections(cam_candidates, iomin_threshold=0.50)
+
+                for det in surviving_dets:
+                    bx1 = max(0.0, det.u - det.w / 2.0)
+                    by1 = max(0.0, det.v - det.h / 2.0)
+                    bx2 = min(float(w_orig - 1), det.u + det.w / 2.0)
+                    by2 = min(float(h_orig - 1), det.v + det.h / 2.0)
+
+                    # Draw styling
+                    draw_styled_segmentation(frame, det.polygon, (bx1, by1, bx2, by2), det.conf, det.u, det.v, det.is_truncated, cam_id=c_id)
+
+                    detection_records.append({
+                        "Frame": f_idx,
+                        "Cam_ID": c_id,
+                        "u": det.u,
+                        "v": det.v,
+                        "w": det.w,
+                        "h": det.h,
+                        "conf": det.conf,
+                        "is_truncated": 1 if det.is_truncated else 0,
+                        "num_poly_pts": len(det.polygon),
+                    })
+                    cam_stats[c_id] = {
+                        "conf": det.conf,
+                        "u": det.u,
+                        "v": det.v,
+                        "is_trunc": det.is_truncated,
+                    }
+                    n_dets += 1
 
                 # Draw top HUD
                 draw_hud_header(frame, c_id, f_idx, total_frames, n_dets)
@@ -366,9 +389,9 @@ def process_videos_yolo26_seg(
     total_time = time.perf_counter() - t_start
     logger.info("Video processing complete in %.2f s (Average speed: %.1f FPS)", total_frames / total_time * 5 if total_time else 0, total_frames / total_time if total_time else 0)
 
-    # Save CSV
+    # Save CSV with semicolon delimiter compatible with main.py pipeline
     df = pd.DataFrame(detection_records)
-    df.to_csv(csv_output, index=False)
+    df.to_csv(csv_output, sep=';', index=False)
     logger.info("Saved %d total detections to: %s", len(df), csv_output)
 
     return {
