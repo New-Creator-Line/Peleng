@@ -1,0 +1,14 @@
+{
+  "model_name": "1. YOLOv8x Baseline",
+  "detector": "YOLOv8x (68.2M params)",
+  "tracker": "3D Linear Kalman Filter",
+  "mae_3d": 732.363720367732,
+  "rmse_3d": 900.5507691628452,
+  "mae_x": 514.7411851648352,
+  "mae_y": 405.42620584415585,
+  "mae_z": 96.89979480519479,
+  "rmse_x": 682.7823247783055,
+  "rmse_y": 574.5628504150229,
+  "rmse_z": 121.150797492582,
+  "sample_count": 1001
+}

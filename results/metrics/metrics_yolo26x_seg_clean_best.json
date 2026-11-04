@@ -1,0 +1,14 @@
+{
+  "model_name": "4. YOLO26x-seg (Clean Polish Best)",
+  "detector": "YOLO26x-seg Clean Polish + TensorRT 11.4",
+  "tracker": "10D CTRV UKF + RTS Smoother + Online (L, W, H)",
+  "mae_3d": 539.1778770620845,
+  "rmse_3d": 689.8603323615333,
+  "mae_x": 395.4838162337662,
+  "mae_y": 281.13253051948055,
+  "mae_z": 47.57407692307692,
+  "rmse_x": 518.6144047373316,
+  "rmse_y": 450.1837277221918,
+  "rmse_z": 65.42926454622503,
+  "sample_count": 1001
+}
