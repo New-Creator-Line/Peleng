@@ -196,13 +196,13 @@ def _extract_video_frame_rgb(
     return _generate_procedural_frame(cam_id=cam_id)
 
 
-def _encode_thumbnail_b64(rgb_frame: np.ndarray, width: int = 320, height: int = 180) -> str:
+def _encode_thumbnail_b64(rgb_frame: np.ndarray, width: int = 960, height: int = 540) -> str:
     """
-    Encodes an RGB numpy array into a compact 320x180 JPEG data URI string.
+    Encodes an RGB numpy array into a crisp 960x540 JPEG data URI string for 16:9 camera HUD overlay.
     """
     pil_img = Image.fromarray(rgb_frame).resize((width, height), Image.Resampling.BILINEAR)
     buf = io.BytesIO()
-    pil_img.save(buf, format="JPEG", quality=78, optimize=True)
+    pil_img.save(buf, format="JPEG", quality=80, optimize=True)
     b64_str = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/jpeg;base64,{b64_str}"
 

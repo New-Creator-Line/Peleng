@@ -202,6 +202,26 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       z-index: 1;
     }
 
+    /* 2D Camera Viewport Overlay (HUD) - Exact 16:9 Frame */
+    #cam-hud-overlay {
+      position: absolute;
+      pointer-events: none;
+      z-index: 2;
+      display: none;
+      overflow: hidden;
+      border: 1px solid rgba(0, 245, 212, 0.4);
+      box-shadow: 0 0 35px rgba(0, 0, 0, 0.85);
+    }
+    #cam-hud-img {
+      width: 100%;
+      height: 100%;
+      object-fit: fill;
+      display: block;
+      opacity: 0.6;
+      transition: opacity 0.1s;
+      transform-origin: center center;
+    }
+
     #labels-container {
       position: absolute;
       inset: 0;
@@ -670,6 +690,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="canvas-container"></div>
+  <!-- 2D Synchronized Camera Viewport HUD (16:9 overlay) -->
+  <div id="cam-hud-overlay">
+    <img id="cam-hud-img" src="" alt="Camera POV Frame" />
+  </div>
   <div id="labels-container"></div>
   <div id="fallback-banner"></div>
 
@@ -712,6 +736,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         <button class="hud-btn" data-view="cam_3">Cam 3 (35mm)</button>
         <button class="hud-btn" data-view="cam_4">Cam 4 (50mm)</button>
         <button class="hud-btn" data-view="cam_5" style="grid-column: 1 / -1;">Cam 5 PTZ (20mm Dynamic)</button>
+      </div>
+      <!-- Photo Overlay Opacity Slider -->
+      <div style="margin-top: 8px; padding: 8px 10px; background: rgba(15, 23, 42, 0.6); border-radius: 6px; border: 1px solid rgba(0, 245, 212, 0.25);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+          <span style="font-weight:600; color:#fff; font-size:11px;">Наложение фото камеры:</span>
+          <span id="photo-opacity-val" style="color:#00f5d4; font-weight:700; font-size:11px;">60%</span>
+        </div>
+        <input type="range" class="slider" id="slider-photo-opacity" min="0" max="100" step="5" value="60" style="width: 100%;" />
       </div>
     </div>
 
@@ -2151,6 +2183,41 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       }
     }
 
+    function updateCameraHudLayout() {
+      const hudOverlay = document.getElementById('cam-hud-overlay');
+      if (!hudOverlay) return;
+
+      if (!activeCameraPreset || !activeCameraPreset.startsWith('cam_')) {
+        hudOverlay.style.display = 'none';
+        return;
+      }
+
+      const winW = window.innerWidth;
+      const winH = window.innerHeight;
+      const targetAspect = 16.0 / 9.0;
+      let viewW, viewH, left, top;
+
+      if (winW / winH > targetAspect) {
+        viewH = winH;
+        viewW = winH * targetAspect;
+        left = (winW - viewW) / 2;
+        top = 0;
+      } else {
+        viewW = winW;
+        viewH = winW / targetAspect;
+        left = 0;
+        top = (winH - viewH) / 2;
+      }
+
+      hudOverlay.style.display = 'block';
+      hudOverlay.style.left = `${left}px`;
+      hudOverlay.style.top = `${top}px`;
+      hudOverlay.style.width = `${viewW}px`;
+      hudOverlay.style.height = `${viewH}px`;
+    }
+
+    window.addEventListener('resize', updateCameraHudLayout);
+
     // Camera Preset Switching
     function setCameraPreset(preset) {
       activeCameraPreset = preset;
@@ -2159,33 +2226,54 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       });
 
       const pipCard = document.getElementById('pip-card');
+      const hudOverlay = document.getElementById('cam-hud-overlay');
+      const hudImg = document.getElementById('cam-hud-img');
       camera.up.set(0, 1, 0);
 
       if (preset === 'orbit') {
         pipCard.classList.remove('visible');
+        if (hudOverlay) hudOverlay.style.display = 'none';
+        controls.enabled = true;
         camera.fov = 48;
         camera.updateProjectionMatrix();
         camera.position.set(-180, 140, 260);
         controls.target.set(0, 5, 0);
       } else if (preset === 'top') {
         pipCard.classList.remove('visible');
+        if (hudOverlay) hudOverlay.style.display = 'none';
+        controls.enabled = true;
         camera.fov = 45;
         camera.updateProjectionMatrix();
         camera.position.set(0, 620, 0.1);
         controls.target.set(0, 0, 0);
       } else if (preset === 'chase') {
         pipCard.classList.remove('visible');
+        if (hudOverlay) hudOverlay.style.display = 'none';
+        controls.enabled = true;
         camera.fov = 52;
         camera.updateProjectionMatrix();
       } else if (preset.startsWith('cam_')) {
         const camKey = preset.replace('cam_', '');
         const rig = cameraRigMap[camKey];
         if (rig) {
+          const fwdDir = ueDirToThree(rig.info.forward || [1, 0, 0]);
+          const upDir = ueDirToThree(rig.info.up || [0, 0, 1]);
+          camera.position.copy(rig.posThree);
+          camera.up.copy(upDir);
+          camera.lookAt(rig.posThree.clone().add(fwdDir));
+          controls.target.copy(rig.posThree.clone().add(fwdDir.clone().multiplyScalar(50.0)));
+          controls.enabled = false;
+
           const fovH = Number(rig.info.fov_h_deg || 40.0);
-          const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+          const aspect = 16.0 / 9.0;
           const fovV = (2.0 * Math.atan(Math.tan((fovH * Math.PI) / 360.0) / aspect) * 180.0) / Math.PI;
           camera.fov = Math.max(15, Math.min(85, fovV));
           camera.updateProjectionMatrix();
+
+          if (hudOverlay && hudImg && rig.info.thumbnail_b64) {
+            hudImg.src = rig.info.thumbnail_b64;
+            updateCameraHudLayout();
+          }
 
           if (rig.info.thumbnail_b64) {
             pipCard.classList.add('visible');
@@ -2206,6 +2294,23 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
     document.querySelectorAll('#camera-presets .hud-btn').forEach(btn => {
       btn.addEventListener('click', () => setCameraPreset(btn.dataset.view));
+    });
+
+    const sliderPhoto = document.getElementById('slider-photo-opacity');
+    if (sliderPhoto) {
+      sliderPhoto.addEventListener('input', e => {
+        const val = parseFloat(e.target.value) / 100.0;
+        const lbl = document.getElementById('photo-opacity-val');
+        if (lbl) lbl.textContent = `${e.target.value}%`;
+        const hudImg = document.getElementById('cam-hud-img');
+        if (hudImg) hudImg.style.opacity = String(val);
+      });
+    }
+
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && activeCameraPreset && activeCameraPreset.startsWith('cam_')) {
+        setCameraPreset('orbit');
+      }
     });
 
     // -------------------------------------------------------------
