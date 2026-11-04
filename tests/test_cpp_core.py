@@ -1,7 +1,8 @@
 import time
 import numpy as np
 import pytest
-import peleng_core
+
+peleng_core = pytest.importorskip("peleng_core", reason="peleng_core C++ extension not built")
 
 
 def test_cpp_triangulation():
