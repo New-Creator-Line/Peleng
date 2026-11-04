@@ -70,3 +70,28 @@ def test_rts_smoother_eliminates_lag():
     # Smoothed trajectory should be monotonic and accurate
     diffs = np.diff(df["Loc_X"].to_numpy())
     assert np.all(diffs > 0)
+
+
+def test_rts_smoother_fixed_lag_sliding_window():
+    """Verify Fixed-Lag RTS strictly uses at most t + lag_frames lookahead and matches smooth_step."""
+    dt = 1.0 / 30.0
+    tracker = UKF10DTracker(dt=dt, process_noise_std=10.0)
+    tracker.initialize(init_pos=np.array([0.0, 0.0, 300.0]), init_yaw=0.0, init_speed=150.0)
+
+    for frame in range(30):
+        tracker.predict()
+        tracker.update_3d_point(np.array([frame * 5.0, frame * 2.0, 300.0]), R_cov=np.eye(3) * 16.0)
+        tracker.commit_step(frame)
+
+    lag = 8
+    smoother = RTSSmoother10D(lag_frames=lag)
+    full_fixed_lag = smoother.smooth(tracker.history)
+    prefix_fixed_lag = smoother.smooth(tracker.history[: 5 + lag + 1])
+
+    # State at t=5 must be bit-identical whether future beyond t+lag exists or not
+    np.testing.assert_allclose(full_fixed_lag[5]["x_smoothed"], prefix_fixed_lag[5]["x_smoothed"], rtol=1e-9, atol=1e-9)
+
+    # Single-step streaming helper must match at target_idx
+    step_rec = smoother.smooth_step(tracker.history[: 5 + lag + 1], target_idx=5)
+    np.testing.assert_allclose(full_fixed_lag[5]["x_smoothed"], step_rec["x_smoothed"], rtol=1e-9, atol=1e-9)
+

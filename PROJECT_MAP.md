@@ -24,7 +24,7 @@ Peleng/
 ├── scripts/                            # Auxiliary operational CLI scripts
 │   ├── training/                       # train_yolo.py, train_rtdetr.py
 │   ├── inference/                      # process_videos_yolo.py (multi-view video & 2D detection generator)
-│   └── dataset/                        # split_v3_dataset.py (stratified train/val group splitter)
+│   └── dataset/                        # extract_frames.py, prepare_scen2_annotation_set.py, build_dual_dataset.py, split_v3_dataset.py
 ├── src/                                # Core library & pipeline algorithms
 │   ├── peleng_core/                    # C++20 acceleration engine (Eigen3 + pybind11)
 │   │   ├── camera_model.hpp            # UE5-to-OpenCV coordinate transform & ray generation

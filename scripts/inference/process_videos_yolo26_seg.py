@@ -1,13 +1,15 @@
 """
-Process Multi-Camera Video Streams with Fine-Tuned YOLO26x-seg (Instance Segmentation).
+Process Multi-Camera Video Streams with Fine-Tuned YOLO26x-seg (Instance Segmentation)
+for an arbitrary number of cameras (N >= 1).
 
 Features:
-1. High-precision instance mask overlays (alpha-blended polygon with sharp contour).
-2. Exact spatial centroid (u_c, v_c) calculated via cv2.moments on mask polygon.
-3. Edge truncation detection (is_truncated flag for truck entering/leaving FOV).
-4. Individual annotated videos for Cameras 1 to 5: results/videos/camera_{i}_yolo26_seg.mp4
-5. Synchronized 5-Camera Multi-View Dashboard: results/videos/multiview_dashboard_yolo26_seg.mp4
-6. Unified 2D Detections CSV: results/detections/detections_2d_yolo26_seg.csv
+1. Dynamic discovery of N >= 1 camera streams (`discover_camera_videos`).
+2. High-precision instance mask overlays (alpha-blended polygon with sharp contour) + EMA box stabilization.
+3. Exact spatial centroid (u_c, v_c) calculated via cv2.moments on mask polygon.
+4. Edge truncation detection (is_truncated flag for truck entering/leaving FOV).
+5. Individual annotated videos for all N cameras: results/videos/camera_{i}_yolo26_seg.mp4
+6. Synchronized N-Camera Multi-View Dashboard: results/videos/multiview_dashboard_yolo26_seg.mp4
+7. Unified 2D Detections CSV + automatic 3D UKF + Sliding-Window RTS (lag=30) trajectory output.
 """
 
 import argparse
@@ -33,13 +35,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.async_capture import AsyncMultiCameraCapture, NVDEC_STATUS
+from src.async_capture import (
+    AsyncMultiCameraCapture,
+    NVDEC_STATUS,
+    assemble_multiview_grid,
+    compute_dashboard_grid_dims,
+    discover_camera_videos,
+)
 from src.async_writer import AsyncMultiVideoWriter, transcode_to_nvenc_parallel
 
 import cv2
 import numpy as np
 import pandas as pd
-import subprocess
 import torch
 from ultralytics import YOLO
 
@@ -168,7 +175,7 @@ def draw_telemetry_tile(
     cam_stats: Dict[int, Optional[Dict[str, Any]]],
     fps: float,
 ) -> np.ndarray:
-    """Draws 6th telemetry tile for the synchronized multi-view dashboard."""
+    """Draws telemetry tile for the synchronized N-camera multi-view dashboard."""
     tile = np.zeros((tile_h, tile_w, 3), dtype=np.uint8)
     tile[:] = (20, 24, 32)
 
@@ -179,12 +186,26 @@ def draw_telemetry_tile(
     # Live frame info
     cv2.putText(tile, f"SYNC TIME: {frame_idx / fps:.2f}s  |  FRAME: {frame_idx:04d}/{total_frames:04d}", (18, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, lineType=cv2.LINE_AA)
 
-    # Camera visibility table
+    # Camera visibility table (dynamic N cameras)
+    cam_ids = sorted(cam_stats.keys())
+    num_cams = len(cam_ids)
     active_cams = sum(1 for c, st in cam_stats.items() if st is not None)
-    cv2.putText(tile, f"CAMERAS DETECTING TARGET: {active_cams} / 5", (18, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 150) if active_cams >= 2 else (0, 165, 255), 2, lineType=cv2.LINE_AA)
+    cv2.putText(
+        tile,
+        f"CAMERAS DETECTING TARGET: {active_cams} / {num_cams}",
+        (18, 105),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (0, 255, 150) if active_cams >= 2 else (0, 165, 255),
+        2,
+        lineType=cv2.LINE_AA,
+    )
 
-    y_offset = 145
-    for c_id in range(1, 6):
+    y_offset = 140
+    row_step = min(32, max(16, (tile_h - 195) // max(1, num_cams)))
+    for c_id in cam_ids:
+        if y_offset > tile_h - 50:
+            break
         st = cam_stats.get(c_id)
         if st is not None:
             c_text = f"CAM {c_id}: VISIBLE | Conf: {st['conf']:.1%} | ({st['u']:.0f}, {st['v']:.0f})"
@@ -195,10 +216,10 @@ def draw_telemetry_tile(
 
         cv2.circle(tile, (25, y_offset - 5), 5, dot_color, -1, lineType=cv2.LINE_AA)
         cv2.putText(tile, c_text, (42, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (230, 235, 240) if st else (120, 125, 135), 1, lineType=cv2.LINE_AA)
-        y_offset += 32
+        y_offset += row_step
 
     # Triangulation readiness banner
-    y_offset += 15
+    y_offset = max(y_offset + 12, tile_h - 30)
     if active_cams >= 2:
         tri_text = "3D TRIANGULATION: READY (Rays >= 2)"
         tri_col = (0, 255, 120)
@@ -210,6 +231,51 @@ def draw_telemetry_tile(
     cv2.putText(tile, tri_text, (25, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.55, tri_col, 2, lineType=cv2.LINE_AA)
 
     return tile
+
+
+def _predict_batch_dynamic(
+    model: YOLO,
+    frames_list: List[np.ndarray],
+    is_trt_engine: bool,
+    conf_threshold: float,
+    imgsz: int,
+    device: str,
+    trt_fixed_batch: int = 5,
+) -> List[Any]:
+    """
+    Runs GPU batch inference for an arbitrary number of cameras N >= 1.
+    If using a TensorRT `.engine` compiled with a fixed batch size (e.g., 5),
+    automatically chunks/pads the frame list so any N works seamlessly.
+    """
+    if not is_trt_engine:
+        return list(
+            model.predict(
+                source=frames_list,
+                conf=conf_threshold,
+                imgsz=imgsz,
+                device=device,
+                verbose=False,
+            )
+        )
+
+    all_results: List[Any] = []
+    n_frames = len(frames_list)
+    for start_idx in range(0, n_frames, trt_fixed_batch):
+        chunk = frames_list[start_idx : start_idx + trt_fixed_batch]
+        orig_len = len(chunk)
+        if orig_len < trt_fixed_batch:
+            dummy = np.zeros_like(chunk[0])
+            chunk = chunk + [dummy] * (trt_fixed_batch - orig_len)
+        chunk_res = model.predict(
+            source=chunk,
+            conf=conf_threshold,
+            imgsz=imgsz,
+            device=device,
+            rect=False,
+            verbose=False,
+        )
+        all_results.extend(chunk_res[:orig_len])
+    return all_results
 
 
 def process_videos_yolo26_seg(
@@ -224,6 +290,8 @@ def process_videos_yolo26_seg(
     max_frames: Optional[int] = None,
     save_videos: bool = True,
     only_dashboard: bool = False,
+    run_3d_pipeline: bool = True,
+    rts_lag: int = 30,
 ) -> Dict[str, Any]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -246,7 +314,8 @@ def process_videos_yolo26_seg(
             raise FileNotFoundError(f"Model weights not found at {weights_path}")
 
     logger.info("Loading fine-tuned YOLO26x-seg from: %s", wt_path.resolve())
-    if wt_path.suffix == ".engine":
+    is_trt_engine = wt_path.suffix == ".engine"
+    if is_trt_engine:
         model = YOLO(str(wt_path), task="segment")
     else:
         model = YOLO(str(wt_path))
@@ -265,15 +334,13 @@ def process_videos_yolo26_seg(
         except Exception as e:
             logger.warning("Could not load 3D trajectory for HUD rendering: %s", e)
 
-    # 2. Map video files
-    cam_videos: Dict[int, str] = {}
-    v_dir = Path(videos_dir)
-    for c_id in range(1, 6):
-        matches = list(v_dir.glob(f"*Actor{c_id}.mp4"))
-        if not matches:
-            raise FileNotFoundError(f"Video for Camera {c_id} not found in {videos_dir}")
-        cam_videos[c_id] = str(matches[0])
-        logger.info("Camera %d: %s", c_id, matches[0].name)
+    # 2. Dynamically discover all N >= 1 camera video streams in videos_dir
+    cam_videos = discover_camera_videos(videos_dir)
+    cam_ids = sorted(cam_videos.keys())
+    num_cams = len(cam_ids)
+    logger.info("Discovered %d camera video stream(s) in '%s': %s", num_cams, videos_dir, cam_ids)
+    for c_id in cam_ids:
+        logger.info("  Camera %d: %s", c_id, Path(cam_videos[c_id]).name)
 
     # 3. Open hardware-accelerated NVDEC capture streams
     logger.info(
@@ -292,7 +359,10 @@ def process_videos_yolo26_seg(
     if max_frames is not None:
         total_frames = min(total_frames, max_frames)
 
-    logger.info("Streams opened: %dx%d @ %.1f FPS | Total Frames to Process: %d", w_orig, h_orig, fps, total_frames)
+    logger.info(
+        "Streams opened (%d cameras): %dx%d @ %.1f FPS | Total Frames to Process: %d",
+        num_cams, w_orig, h_orig, fps, total_frames,
+    )
 
     # 4. Initialize Asynchronous Multi-Stream Video Writers
     out_paths: Dict[int, Path] = {}
@@ -303,44 +373,47 @@ def process_videos_yolo26_seg(
     if save_videos:
         async_writer = AsyncMultiVideoWriter(queue_size=16)
         if not only_dashboard:
-            for c_id in range(1, 6):
+            for c_id in cam_ids:
                 p = out_dir / f"camera_{c_id}_yolo26_seg.mp4"
                 async_writer.add_stream(c_id, p, fps, (w_orig, h_orig))
                 out_paths[c_id] = p
 
-        # Multi-view dashboard: 3 cols x 2 rows (each tile 640x360 -> total 1920x720)
-        dashboard_w, dashboard_h = 1920, 720
+        # Dynamic Multi-view dashboard grid for N cameras + 1 telemetry tile
+        _, _, dashboard_w, dashboard_h = compute_dashboard_grid_dims(
+            num_cams, include_telemetry=True, tile_w=tile_w, tile_h=tile_h
+        )
         async_writer.add_stream("dashboard", dashboard_path, fps, (dashboard_w, dashboard_h))
 
     detection_records: List[Dict[str, Any]] = []
+    # Causal EMA state per camera for 2D bounding-box anti-shake visualization
+    box_ema_state: Dict[int, np.ndarray] = {}
+    ema_alpha = 0.35
     t_start = time.perf_counter()
 
-    logger.info("Processing synchronized multi-camera streams...")
+    logger.info("Processing %d synchronized camera stream(s)...", num_cams)
 
     try:
         for f_idx in range(total_frames):
             raw_frames = multi_cap.read_sync(timeout=3.0)
-            if raw_frames is None or len(raw_frames) < 5:
+            if raw_frames is None or len(raw_frames) < num_cams:
                 logger.warning("Stream ended early at frame %d", f_idx)
                 break
 
-            # Batch predict on all 5 camera frames in a single GPU forward pass
-            frames_list = [raw_frames[c_id] for c_id in range(1, 6)]
-            predict_kwargs: Dict[str, Any] = {
-                "source": frames_list,
-                "conf": conf_threshold,
-                "imgsz": imgsz,
-                "device": device,
-                "verbose": False,
-            }
-            if wt_path.suffix == ".engine":
-                predict_kwargs["rect"] = False
-            results = model.predict(**predict_kwargs)
+            # Batch predict on all N camera frames
+            frames_list = [raw_frames[c_id] for c_id in cam_ids]
+            results = _predict_batch_dynamic(
+                model=model,
+                frames_list=frames_list,
+                is_trt_engine=is_trt_engine,
+                conf_threshold=conf_threshold,
+                imgsz=imgsz,
+                device=device,
+            )
 
-            cam_stats: Dict[int, Optional[Dict[str, Any]]] = {c: None for c in range(1, 6)}
+            cam_stats: Dict[int, Optional[Dict[str, Any]]] = {c: None for c in cam_ids}
             annotated_tiles: Dict[int, np.ndarray] = {}
 
-            for idx, c_id in enumerate(range(1, 6)):
+            for idx, c_id in enumerate(cam_ids):
                 frame = raw_frames[c_id]
                 res = results[idx]
                 n_dets = 0
@@ -382,11 +455,26 @@ def process_videos_yolo26_seg(
                 # Suppress nested sub-parts (e.g. smaller cabin box inside full truck box)
                 surviving_dets = suppress_nested_detections(cam_candidates, iomin_threshold=0.50)
 
+                if not surviving_dets:
+                    box_ema_state.pop(c_id, None)
+
                 for det in surviving_dets:
-                    bx1 = max(0.0, det.u - det.w / 2.0)
-                    by1 = max(0.0, det.v - det.h / 2.0)
-                    bx2 = min(float(w_orig - 1), det.u + det.w / 2.0)
-                    by2 = min(float(h_orig - 1), det.v + det.h / 2.0)
+                    raw_box = np.array([
+                        max(0.0, det.u - det.w / 2.0),
+                        max(0.0, det.v - det.h / 2.0),
+                        min(float(w_orig - 1), det.u + det.w / 2.0),
+                        min(float(h_orig - 1), det.v + det.h / 2.0),
+                    ], dtype=np.float64)
+
+                    if c_id in box_ema_state and len(surviving_dets) == 1:
+                        smooth_box = ema_alpha * raw_box + (1.0 - ema_alpha) * box_ema_state[c_id]
+                        box_ema_state[c_id] = smooth_box
+                    else:
+                        smooth_box = raw_box
+                        if len(surviving_dets) == 1:
+                            box_ema_state[c_id] = raw_box
+
+                    bx1, by1, bx2, by2 = [float(v) for v in smooth_box]
 
                     # Draw styling
                     draw_styled_segmentation(frame, det.polygon, (bx1, by1, bx2, by2), det.conf, det.u, det.v, det.is_truncated, cam_id=c_id)
@@ -446,30 +534,25 @@ def process_videos_yolo26_seg(
                     annotated_tiles[c_id] = tile
 
             if save_videos and async_writer is not None:
-                # Build 6th tile (Telemetry Status Pane)
+                # Build Telemetry Status Pane & assemble N-camera grid dynamically
                 telemetry_tile = draw_telemetry_tile(tile_w, tile_h, f_idx, total_frames, cam_stats, fps)
-
-                # Assemble 3x2 grid:
-                # Row 1: Cam 1 | Cam 2 | Cam 3
-                # Row 2: Cam 4 | Cam 5 | Telemetry
-                row1 = np.hstack([annotated_tiles[1], annotated_tiles[2], annotated_tiles[3]])
-                row2 = np.hstack([annotated_tiles[4], annotated_tiles[5], telemetry_tile])
-                dashboard_frame = np.vstack([row1, row2])
-
+                dashboard_frame = assemble_multiview_grid(annotated_tiles, telemetry_tile, tile_w=tile_w, tile_h=tile_h)
                 async_writer.write("dashboard", dashboard_frame)
 
             if (f_idx + 1) % 100 == 0 or (f_idx + 1) == total_frames:
                 elapsed = time.perf_counter() - t_start
                 fps_proc = (f_idx + 1) / elapsed
-                logger.info("Processed frame %d/%d (%.1f%%) | Speed: %.1f FPS (5 streams parallel)",
-                            f_idx + 1, total_frames, (f_idx + 1) / total_frames * 100, fps_proc)
+                logger.info(
+                    "Processed frame %d/%d (%.1f%%) | Speed: %.1f sync FPS (%d streams parallel)",
+                    f_idx + 1, total_frames, (f_idx + 1) / total_frames * 100, fps_proc, num_cams,
+                )
 
     finally:
         multi_cap.close()
         if async_writer is not None:
             async_writer.close()
 
-    # Hardware NVENC Post-Transcode via NVIDIA Video Codec SDK (Parallel 6 Streams)
+    # Hardware NVENC Post-Transcode via NVIDIA Video Codec SDK
     if save_videos and FFMPEG_EXE is not None:
         logger.info("Hardware Encoding (NVIDIA NVENC / Video Codec SDK): Finalizing H.264 streams in parallel...")
         videos_to_transcode = []
@@ -478,20 +561,40 @@ def process_videos_yolo26_seg(
         if dashboard_path.exists():
             videos_to_transcode.append(dashboard_path)
 
-        transcode_to_nvenc_parallel(videos_to_transcode, preset="p2", bitrate="5M", max_workers=6)
+        transcode_to_nvenc_parallel(videos_to_transcode, preset="p2", bitrate="5M", max_workers=min(8, num_cams + 1))
 
     total_time = time.perf_counter() - t_start
-    logger.info("Video processing complete in %.2f s (Average speed: %.1f FPS)", total_time, (total_frames * 5) / total_time if total_time else 0.0)
+    logger.info(
+        "Video processing complete in %.2f s (Average speed: %.1f stream FPS across %d cameras)",
+        total_time, (total_frames * num_cams) / total_time if total_time else 0.0, num_cams,
+    )
 
     # Save CSV with semicolon delimiter compatible with main.py pipeline
     df = pd.DataFrame(detection_records)
     if max_frames is None or not Path(csv_output).exists():
         df.to_csv(csv_output, sep=';', index=False)
-        logger.info("Saved %d total detections to: %s", len(df), csv_output)
+        logger.info("Saved %d total detections across %d cameras to: %s", len(df), num_cams, csv_output)
     else:
         logger.info("Preview run (max_frames=%d): preserved existing full %s", max_frames, csv_output)
 
+    # Automatically run 3D triangulation + 10D UKF + Sliding-Window RTS (lag=30) to produce final 3D results
+    if run_3d_pipeline and max_frames is None and len(df) > 0:
+        try:
+            from main import run_pipeline
+            out_traj = trajectory_csv or "results/trajectories/output_trajectory_ukf.csv"
+            logger.info("Running 3D Multi-Camera Triangulation & UKF (RTS sliding window = %d frames)...", rts_lag)
+            run_pipeline(
+                calib_dir=videos_dir,
+                detections_csv=csv_output,
+                output_csv=out_traj,
+                rts_lag=rts_lag,
+            )
+        except Exception as e:
+            logger.warning("Could not auto-run 3D pipeline after video detection: %s", e)
+
     return {
+        "num_cameras": num_cams,
+        "camera_ids": cam_ids,
         "total_frames": total_frames,
         "total_time_s": total_time,
         "dashboard_path": str(dashboard_path),
@@ -502,8 +605,7 @@ def process_videos_yolo26_seg(
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Process multi-camera videos with YOLO26x-seg")
-    # Prefer ultra-fast FP16 TensorRT engine (124 MB, opt shape 5x3x1024x1024)
+    parser = argparse.ArgumentParser(description="Process N multi-camera videos with YOLO26x-seg")
     default_weights = "weights/finetuned/peleng_yolo26x_seg_clean_polish_best_fp16.engine"
     if not Path(default_weights).exists():
         default_weights = "weights/finetuned/peleng_yolo26x_seg_clean_best.engine"
@@ -517,13 +619,15 @@ def parse_args():
     parser.add_argument("--videos-dir", default="data/raw/hackathon")
     parser.add_argument("--output-dir", default="results/videos")
     parser.add_argument("--csv-output", default="results/detections/detections_2d_yolo26_seg.csv")
-    parser.add_argument("--trajectory", default="results/trajectories/output_trajectory_ukf.csv", help="3D trajectory CSV for HUD wireframe overlay")
+    parser.add_argument("--trajectory", default="results/trajectories/output_trajectory_ukf.csv", help="3D trajectory CSV for HUD wireframe overlay and output")
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--imgsz", type=int, default=1024)
     parser.add_argument("--device", default="0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--max-frames", type=int, default=None, help="Limit frames to process for quick preview")
-    parser.add_argument("--skip-videos", action="store_true", help="Skip video generation, only extract 2D detections CSV")
+    parser.add_argument("--skip-videos", action="store_true", help="Skip video generation, only extract 2D detections CSV & 3D trajectory")
     parser.add_argument("--only-dashboard", action="store_true", help="Only generate multi-view dashboard video, skip individual camera videos")
+    parser.add_argument("--no-3d", action="store_false", dest="run_3d", help="Skip automatic 3D trajectory reconstruction after 2D extraction")
+    parser.add_argument("--rts-lag", type=int, default=30, help="Sliding-window RTS lag in frames (default: 30)")
     return parser.parse_args()
 
 
@@ -541,4 +645,6 @@ if __name__ == "__main__":
         max_frames=args.max_frames,
         save_videos=not args.skip_videos,
         only_dashboard=args.only_dashboard,
+        run_3d_pipeline=args.run_3d,
+        rts_lag=args.rts_lag,
     )

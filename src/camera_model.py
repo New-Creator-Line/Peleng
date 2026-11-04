@@ -233,14 +233,33 @@ def load_camera_csv(csv_path: str, cam_id: int) -> CameraTimeline:
 
 
 def load_all_cameras(calib_dir: str) -> Dict[int, CameraTimeline]:
+    """
+    Dynamically discovers and loads calibration timelines for any N >= 1 cameras
+    in `calib_dir`. Supports Unreal Engine (`*CineCameraActor{id}.csv`) as well
+    as generic naming (`*cam_{id}.csv`, `*camera_{id}.csv`, `*{id}.csv`).
+    """
     cameras: Dict[int, CameraTimeline] = {}
-    pattern = os.path.join(calib_dir, "object_transform_CineCameraActor*.csv")
-    files = glob.glob(pattern)
+    all_csvs = sorted(glob.glob(os.path.join(calib_dir, "*.csv")))
 
-    for fpath in files:
-        match = re.search(r"CineCameraActor(\d+)\.csv", fpath)
-        if match:
-            cam_id = int(match.group(1))
-            cameras[cam_id] = load_camera_csv(fpath, cam_id)
+    patterns = [
+        r"CineCameraActor(\d+)\.csv$",
+        r"cam(?:era)?[_\-\s]*(\d+)\.csv$",
+        r"(?:^|[_\-\s])(\d+)\.csv$",
+    ]
+
+    for pat in patterns:
+        for fpath in all_csvs:
+            fname = os.path.basename(fpath)
+            if "track" in fname.lower() or "ground_truth" in fname.lower() or "detections" in fname.lower():
+                continue
+            match = re.search(pat, fname, flags=re.IGNORECASE)
+            if match:
+                cam_id = int(match.group(1))
+                if cam_id not in cameras:
+                    tl = load_camera_csv(fpath, cam_id)
+                    if tl.frames:
+                        cameras[cam_id] = tl
+        if cameras:
+            break
 
     return cameras

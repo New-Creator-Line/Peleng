@@ -1,9 +1,8 @@
 """
-Inference script to detect truck cabin across all 5 cameras using fine-tuned model.
+Inference script to detect truck cabin across any N >= 1 cameras using fine-tuned model.
 Outputs results/detections/detections_2d_cabin.csv.
 """
 
-import glob
 import os
 import sys
 from pathlib import Path
@@ -17,27 +16,25 @@ import pandas as pd
 import numpy as np
 import torch
 from ultralytics import YOLO
+from src.async_capture import discover_camera_videos
 
 
 def run_cabin_detection(
     weights_path: str = "weights/cabin/peleng_cabin_best.pt",
-    videos_dir: str = "хакатон",
+    videos_dir: str = "data/raw/hackathon",
     output_csv: str = "results/detections/detections_2d_cabin.csv",
     conf: float = 0.25,
     imgsz: int = 960,
     device: str = "0" if torch.cuda.is_available() else "cpu",
 ):
+    if not os.path.exists(videos_dir) and os.path.exists("хакатон"):
+        videos_dir = "хакатон"
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
     print(f"[INFO] Loading cabin detector from: {weights_path}")
     model = YOLO(weights_path)
 
-    # Discover videos
-    video_paths = {}
-    for cam_id in range(1, 6):
-        pattern = os.path.join(videos_dir, f"*{cam_id}.mp4")
-        matches = glob.glob(pattern)
-        if matches:
-            video_paths[cam_id] = matches[0]
+    # Dynamically discover any N >= 1 camera video streams
+    video_paths = discover_camera_videos(videos_dir)
 
     print(f"[INFO] Running cabin detection on {len(video_paths)} cameras at imgsz={imgsz} on {device}...")
     records = []
@@ -46,6 +43,8 @@ def run_cabin_detection(
         vpath = video_paths[cam_id]
         cap = cv2.VideoCapture(vpath)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        w_img = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1920.0
+        h_img = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080.0
         print(f"  [Camera {cam_id}] Processing {os.path.basename(vpath)} ({total_frames} frames)...")
 
         f_idx = 0
@@ -65,7 +64,6 @@ def run_cabin_detection(
                 results = model.predict(batch_frames, conf=conf, imgsz=imgsz, device=device, verbose=False)
                 for f_num, res in zip(batch_indices, results):
                     if len(res.boxes) > 0:
-                        # Take the detection with highest confidence
                         best_idx = int(torch.argmax(res.boxes.conf).item())
                         box = res.boxes.xyxy[best_idx].cpu().numpy()
                         c = float(res.boxes.conf[best_idx].item())
@@ -74,7 +72,7 @@ def run_cabin_detection(
                         v = (y1 + y2) / 2.0
                         w = x2 - x1
                         h = y2 - y1
-                        is_edge = int(x1 <= 5.0 or x2 >= 1915.0 or y1 <= 5.0 or y2 >= 1075.0)
+                        is_edge = int(x1 <= 5.0 or x2 >= (w_img - 5.0) or y1 <= 5.0 or y2 >= (h_img - 5.0))
                         records.append({
                             "Frame": f_num,
                             "Cam_ID": cam_id,
@@ -103,7 +101,7 @@ def run_cabin_detection(
                     v = (y1 + y2) / 2.0
                     w = x2 - x1
                     h = y2 - y1
-                    is_edge = int(x1 <= 5.0 or x2 >= 1915.0 or y1 <= 5.0 or y2 >= 1075.0)
+                    is_edge = int(x1 <= 5.0 or x2 >= (w_img - 5.0) or y1 <= 5.0 or y2 >= (h_img - 5.0))
                     records.append({
                         "Frame": f_num,
                         "Cam_ID": cam_id,
@@ -127,4 +125,3 @@ def run_cabin_detection(
 
 if __name__ == "__main__":
     run_cabin_detection()
-

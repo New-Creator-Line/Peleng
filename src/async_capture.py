@@ -216,3 +216,79 @@ class AsyncMultiCameraCapture:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
+
+
+def discover_camera_videos(videos_dir: str) -> Dict[int, str]:
+    """
+    Dynamically discovers all N camera video streams in `videos_dir` without hardcoding N=5.
+    Supports filenames like `*Actor{id}.mp4`, `*cam_{id}.mp4`, `*{id}.mp4`, or arbitrary `.mp4/.avi/.mkv`.
+    """
+    import re
+    v_dir = Path(videos_dir)
+    if not v_dir.exists():
+        raise FileNotFoundError(f"Videos directory not found: {videos_dir}")
+
+    exts = (".mp4", ".avi", ".mkv", ".mov")
+    candidates = sorted(
+        f for f in v_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in exts and not f.name.startswith("multiview_")
+    )
+    if not candidates:
+        raise FileNotFoundError(f"No camera video files ({exts}) found in {videos_dir}")
+
+    cam_videos: Dict[int, str] = {}
+    unmatched = []
+    for f in candidates:
+        m = (
+            re.search(r"Actor(\d+)", f.stem, re.IGNORECASE)
+            or re.search(r"cam(?:era)?[_\-]?(\d+)", f.stem, re.IGNORECASE)
+            or re.search(r"(\d+)$", f.stem)
+        )
+        if m:
+            c_id = int(m.group(1))
+            if c_id not in cam_videos:
+                cam_videos[c_id] = str(f)
+            else:
+                unmatched.append(f)
+        else:
+            unmatched.append(f)
+
+    next_id = max(cam_videos.keys(), default=0) + 1
+    for f in unmatched:
+        cam_videos[next_id] = str(f)
+        next_id += 1
+
+    return dict(sorted(cam_videos.items()))
+
+
+def compute_dashboard_grid_dims(num_cameras: int, include_telemetry: bool = True, tile_w: int = 640, tile_h: int = 360):
+    """Computes (n_cols, n_rows, dashboard_w, dashboard_h) for arbitrary N cameras."""
+    import math
+    total_tiles = max(1, num_cameras + (1 if include_telemetry else 0))
+    n_cols = max(1, int(math.ceil(math.sqrt(total_tiles))))
+    n_rows = max(1, int(math.ceil(total_tiles / n_cols)))
+    return n_cols, n_rows, n_cols * tile_w, n_rows * tile_h
+
+
+def assemble_multiview_grid(
+    annotated_tiles: Dict[int, np.ndarray],
+    telemetry_tile: Optional[np.ndarray] = None,
+    tile_w: int = 640,
+    tile_h: int = 360,
+) -> np.ndarray:
+    """Assembles an arbitrary N-camera tile dictionary + optional telemetry tile into a balanced grid."""
+    cam_ids = sorted(annotated_tiles.keys())
+    n_cols, n_rows, _, _ = compute_dashboard_grid_dims(
+        len(cam_ids), include_telemetry=(telemetry_tile is not None), tile_w=tile_w, tile_h=tile_h
+    )
+    cells = [annotated_tiles[c] for c in cam_ids]
+    if telemetry_tile is not None:
+        cells.append(telemetry_tile)
+
+    blank = np.full((tile_h, tile_w, 3), (18, 22, 28), dtype=np.uint8)
+    while len(cells) < n_cols * n_rows:
+        cells.append(blank.copy())
+
+    rows = [np.hstack(cells[r * n_cols : (r + 1) * n_cols]) for r in range(n_rows)]
+    return np.vstack(rows)
+

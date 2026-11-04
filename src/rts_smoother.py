@@ -16,73 +16,136 @@ from src.tracker_ukf import FilterStepRecord, compute_cabin_pivot_shift, normali
 class RTSSmoother10D:
     """
     Nonlinear Rauch-Tung-Striebel Backward Smoother for 10D UKF.
-    Runs backward from t = T-1 to 0 over cached prior and posterior filter records.
+    Supports both:
+    - Fixed-Lag Sliding Window streaming mode (`lag_frames = L`, e.g., 15..30 frames = 0.5..1.0 s buffer)
+    - Full-trajectory offline batch mode (`lag_frames = None`)
     """
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, lag_frames: Optional[int] = None) -> None:
+        self.lag_frames = lag_frames
 
-    def smooth(self, history: List[FilterStepRecord]) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _compute_gain(next_rec: FilterStepRecord) -> np.ndarray:
+        """Computes RTS smoother gain C_t = P_{x_t, x_{t+1|t}} * P_{t+1|t}^-1."""
+        P_pred_next = next_rec.P_pred
+        P_cross = next_rec.P_x_xpred
+        P_pred_sym = 0.5 * (P_pred_next + P_pred_next.T) + np.eye(10) * 1e-6
+        try:
+            return np.linalg.solve(P_pred_sym.T, P_cross.T).T
+        except np.linalg.LinAlgError:
+            inv_P_pred = np.linalg.pinv(P_pred_sym)
+            return P_cross @ inv_P_pred
+
+    def smooth_step(
+        self,
+        window_history: List[FilterStepRecord],
+        target_idx: int = 0,
+    ) -> Dict[str, Any]:
         """
-        Executes RTS backward pass.
+        Online streaming single-frame fixed-lag RTS smoothing over a bounded ring buffer
+        `window_history` (where `target_idx` is the frame being emitted and `window_history[-1]`
+        is at most `t + lag_frames`).
+        """
+        smoothed_win = self.smooth(window_history, lag_frames=None)
+        idx = max(0, min(len(smoothed_win) - 1, target_idx))
+        return smoothed_win[idx]
+
+    def smooth(
+        self,
+        history: List[FilterStepRecord],
+        lag_frames: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Executes RTS backward pass (either Fixed-Lag Sliding Window if `lag_frames` is set,
+        or full-horizon if `lag_frames` is None).
         Returns list of smoothed state dictionaries with analytical error ribbons (+-sigma).
         """
         T = len(history)
         if T == 0:
             return []
 
+        eff_lag = lag_frames if lag_frames is not None else self.lag_frames
+        if eff_lag is not None and eff_lag < 0:
+            eff_lag = None
+
         # Arrays to hold smoothed trajectory
         x_smooth = [np.zeros(10, dtype=np.float64) for _ in range(T)]
         P_smooth = [np.zeros((10, 10), dtype=np.float64) for _ in range(T)]
 
-        # Terminal boundary condition at t = T - 1: smoothed equals filtered
-        x_smooth[-1] = history[-1].x_post.copy()
-        P_smooth[-1] = history[-1].P_post.copy()
+        # Precompute step gains C_k once per step k in [0, T-2]
+        C_gains = [self._compute_gain(history[k + 1]) for k in range(T - 1)]
 
-        # Backward iteration: t = T - 2 down to 0
-        for t in range(T - 2, -1, -1):
-            curr_rec = history[t]
-            next_rec = history[t + 1]
+        if eff_lag is None or eff_lag >= T - 1:
+            # Full-horizon backward pass: t = T - 1 down to 0
+            x_smooth[-1] = history[-1].x_post.copy()
+            P_smooth[-1] = history[-1].P_post.copy()
 
-            x_post_t = curr_rec.x_post
-            P_post_t = curr_rec.P_post
+            for t in range(T - 2, -1, -1):
+                curr_rec = history[t]
+                next_rec = history[t + 1]
+                x_post_t = curr_rec.x_post
+                P_post_t = curr_rec.P_post
+                x_pred_next = next_rec.x_pred
+                P_pred_next = next_rec.P_pred
+                Ct = C_gains[t]
 
-            x_pred_next = next_rec.x_pred
-            P_pred_next = next_rec.P_pred
-            P_cross = next_rec.P_x_xpred  # Cross-covariance between x_t and x_{t+1|t}
+                delta_x = x_smooth[t + 1] - x_pred_next
+                delta_x[4] = normalize_angle(delta_x[4])
 
-            # Smoother gain C_t = P_{x_t, x_{t+1}} * P_{t+1|t}^-1
-            P_pred_sym = 0.5 * (P_pred_next + P_pred_next.T) + np.eye(10) * 1e-6
-            try:
-                # Solve C_t * P_pred_sym = P_cross -> P_pred_sym.T * C_t.T = P_cross.T
-                Ct = np.linalg.solve(P_pred_sym.T, P_cross.T).T
-            except np.linalg.LinAlgError:
-                inv_P_pred = np.linalg.pinv(P_pred_sym)
-                Ct = P_cross @ inv_P_pred
+                x_t_T = x_post_t + Ct @ delta_x
+                x_t_T[4] = normalize_angle(x_t_T[4])
 
-            # State difference delta = x_{t+1|T} - x_{t+1|t}
-            delta_x = x_smooth[t + 1] - x_pred_next
-            # Unwind yaw angle difference
-            delta_x[4] = normalize_angle(delta_x[4])
+                delta_P = P_smooth[t + 1] - P_pred_next
+                P_t_T = P_post_t + Ct @ delta_P @ Ct.T
+                P_t_T = 0.5 * (P_t_T + P_t_T.T)
 
-            # Smoothed state: x_{t|T} = x_{t|t} + C_t * delta
-            x_t_T = x_post_t + Ct @ delta_x
-            x_t_T[4] = normalize_angle(x_t_T[4])
+                for d in range(10):
+                    if P_t_T[d, d] <= 0.0 or P_t_T[d, d] > P_post_t[d, d]:
+                        P_t_T[d, d] = P_post_t[d, d]
 
-            # Smoothed covariance: P_{t|T} = P_{t|t} + C_t * (P_{t+1|T} - P_{t+1|t}) * C_t^T
-            delta_P = P_smooth[t + 1] - P_pred_next
-            P_t_T = P_post_t + Ct @ delta_P @ Ct.T
-            P_t_T = 0.5 * (P_t_T + P_t_T.T)
+                x_smooth[t] = x_t_T
+                P_smooth[t] = P_t_T
+        elif eff_lag == 0:
+            for t in range(T):
+                x_smooth[t] = history[t].x_post.copy()
+                P_smooth[t] = history[t].P_post.copy()
+        else:
+            # Fixed-Lag Sliding Window backward pass: at frame t, only frames up to min(T-1, t + eff_lag) are used
+            for t in range(T):
+                end_idx = min(T - 1, t + eff_lag)
+                x_curr = history[end_idx].x_post.copy()
+                P_curr = history[end_idx].P_post.copy()
 
-            # Enforce positive variance guarantee: P_{t|T} <= P_{t|t}
-            for d in range(10):
-                if P_t_T[d, d] <= 0.0 or P_t_T[d, d] > P_post_t[d, d]:
-                    P_t_T[d, d] = P_post_t[d, d]
+                for k in range(end_idx - 1, t - 1, -1):
+                    curr_rec = history[k]
+                    next_rec = history[k + 1]
+                    x_post_k = curr_rec.x_post
+                    P_post_k = curr_rec.P_post
+                    x_pred_next = next_rec.x_pred
+                    P_pred_next = next_rec.P_pred
+                    Ct = C_gains[k]
 
-            x_smooth[t] = x_t_T
-            P_smooth[t] = P_t_T
+                    delta_x = x_curr - x_pred_next
+                    delta_x[4] = normalize_angle(delta_x[4])
 
-        # Apply analytical cabin pivot alignment along zero-lag smoothed heading psi_{t|T}
+                    x_k = x_post_k + Ct @ delta_x
+                    x_k[4] = normalize_angle(x_k[4])
+
+                    delta_P = P_curr - P_pred_next
+                    P_k = P_post_k + Ct @ delta_P @ Ct.T
+                    P_k = 0.5 * (P_k + P_k.T)
+
+                    for d in range(10):
+                        if P_k[d, d] <= 0.0 or P_k[d, d] > P_post_k[d, d]:
+                            P_k[d, d] = P_post_k[d, d]
+
+                    x_curr = x_k
+                    P_curr = P_k
+
+                x_smooth[t] = x_curr
+                P_smooth[t] = P_curr
+
+        # Apply analytical cabin pivot alignment along smoothed heading psi_t (respecting eff_lag lookahead bound)
         has_cabin_shift = any(
             abs(rec.delta_l_cabin) > 1e-6 or abs(rec.delta_z_cabin) > 1e-6
             for rec in history
@@ -91,9 +154,10 @@ class RTSSmoother10D:
             body_xy = np.array([[st[0], st[1]] for st in x_smooth], dtype=np.float64)
             dt_nom = 1.0 / 30.0
             last_psi = 0.77
+            max_fwd = 8 if eff_lag is None else min(8, eff_lag)
             for t in range(T):
                 i0 = max(0, t - 8)
-                i1 = min(T - 1, t + 8)
+                i1 = min(T - 1, t + max_fwd)
                 dv = body_xy[i1] - body_xy[i0]
                 dn = float(np.linalg.norm(dv))
                 if dn > 10.0:

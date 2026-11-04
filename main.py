@@ -384,9 +384,11 @@ def run_pipeline(
     dt: float = 1.0 / 30.0,
     tracker_type: str = "ukf",
     use_rts: bool = True,
+    rts_lag: Optional[int] = 30,
     plot_dims: bool = True,
     realtime_only: bool = False,
     road_spline_path: Optional[str] = None,
+    videos_dir: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Executes the full 3D reconstruction and tracking pipeline.
@@ -415,17 +417,47 @@ def run_pipeline(
     panning_cams = _detect_panning_cameras(cameras)
     print(f"      Loaded {len(cameras)} cameras: {sorted(cameras.keys())} (panning: {sorted(panning_cams)})")
 
-    # 2. Handle 2D Detections
+    # 2. Handle 2D Detections (auto-extract from N video streams if requested or if CSV missing)
     is_mock_mode = False
-    if not detections_csv or not os.path.exists(detections_csv):
-        if gt_csv and os.path.exists(gt_csv):
-            print(f"[2/5] Detections file not found. Generating mock detections from GT: '{gt_csv}'...")
-            mock_path = "results/detections/detections_2d_mock.csv"
-            generate_mock_detections(calib_dir, gt_csv, mock_path, noise_std_px=1.5)
-            detections_csv = mock_path
-            is_mock_mode = True
-        else:
-            raise FileNotFoundError(f"Detections CSV '{detections_csv}' not found and no GT available to mock.")
+    if videos_dir is not None or (not detections_csv or not os.path.exists(detections_csv)):
+        v_dir_cand = _resolve_input_path(videos_dir or calib_dir, "хакатон")
+        try:
+            from src.async_capture import discover_camera_videos
+            discovered_vids = discover_camera_videos(v_dir_cand) if os.path.isdir(v_dir_cand) else {}
+        except Exception:
+            discovered_vids = {}
+
+        if videos_dir is not None and discovered_vids:
+            out_det_csv = detections_csv or "results/detections/detections_2d_stream.csv"
+            print(f"[2/5] Running live 2D detection on {len(discovered_vids)} camera stream(s) in '{v_dir_cand}'...")
+            from scripts.inference.process_videos_yolo26_seg import process_videos_yolo26_seg
+            process_videos_yolo26_seg(
+                videos_dir=v_dir_cand,
+                csv_output=out_det_csv,
+                save_videos=False,
+                run_3d_pipeline=False,
+            )
+            detections_csv = out_det_csv
+        elif not detections_csv or not os.path.exists(detections_csv):
+            if gt_csv and os.path.exists(gt_csv):
+                print(f"[2/5] Detections file not found. Generating mock detections from GT: '{gt_csv}'...")
+                mock_path = "results/detections/detections_2d_mock.csv"
+                generate_mock_detections(calib_dir, gt_csv, mock_path, noise_std_px=1.5)
+                detections_csv = mock_path
+                is_mock_mode = True
+            elif discovered_vids:
+                out_det_csv = detections_csv or "results/detections/detections_2d_stream.csv"
+                print(f"[2/5] Detections CSV not found. Auto-detecting from {len(discovered_vids)} camera stream(s) in '{v_dir_cand}'...")
+                from scripts.inference.process_videos_yolo26_seg import process_videos_yolo26_seg
+                process_videos_yolo26_seg(
+                    videos_dir=v_dir_cand,
+                    csv_output=out_det_csv,
+                    save_videos=False,
+                    run_3d_pipeline=False,
+                )
+                detections_csv = out_det_csv
+            else:
+                raise FileNotFoundError(f"Detections CSV '{detections_csv}' not found and no GT or video streams available.")
 
     print(f"[2/5] Loading 2D detections from: '{detections_csv}'...")
     grouped_detections = load_detections(detections_csv)
@@ -496,14 +528,30 @@ def run_pipeline(
             cabin_z_shift=0.0,
             reproj_w_scale=0.06 if is_yolo_bbox else 0.0,
         )
-        smooth_p1 = pd.DataFrame(pass1_xyz).rolling(window=31, center=True, min_periods=1).mean().to_numpy()
-        headings = np.zeros_like(smooth_p1)
-        for f_i in range(len(smooth_p1)):
-            f0, f1 = max(0, f_i - 35), min(len(smooth_p1) - 1, f_i + 35)
-            dv = smooth_p1[f1] - smooth_p1[f0]
-            dv[2] *= 0.3
-            dn = float(np.linalg.norm(dv))
-            headings[f_i] = dv / (dn + 1e-9) if dn > 10.0 else np.array([1.0, 0.0, 0.0])
+        if rts_lag is not None and rts_lag > 0:
+            n_p1 = len(pass1_xyz)
+            smooth_p1 = np.zeros_like(pass1_xyz)
+            for f_i in range(n_p1):
+                w0 = max(0, f_i - 15)
+                w1 = min(n_p1, f_i + min(15, rts_lag) + 1)
+                smooth_p1[f_i] = np.mean(pass1_xyz[w0:w1], axis=0)
+            headings = np.zeros_like(smooth_p1)
+            for f_i in range(n_p1):
+                f0 = max(0, f_i - 35)
+                f1 = min(n_p1 - 1, f_i + min(35, rts_lag))
+                dv = smooth_p1[f1] - smooth_p1[f0]
+                dv[2] *= 0.3
+                dn = float(np.linalg.norm(dv))
+                headings[f_i] = dv / (dn + 1e-9) if dn > 10.0 else np.array([1.0, 0.0, 0.0])
+        else:
+            smooth_p1 = pd.DataFrame(pass1_xyz).rolling(window=31, center=True, min_periods=1).mean().to_numpy()
+            headings = np.zeros_like(smooth_p1)
+            for f_i in range(len(smooth_p1)):
+                f0, f1 = max(0, f_i - 35), min(len(smooth_p1) - 1, f_i + 35)
+                dv = smooth_p1[f1] - smooth_p1[f0]
+                dv[2] *= 0.3
+                dn = float(np.linalg.norm(dv))
+                headings[f_i] = dv / (dn + 1e-9) if dn > 10.0 else np.array([1.0, 0.0, 0.0])
     else:
         smooth_p1 = None
         headings = None
@@ -775,8 +823,14 @@ def run_pipeline(
             )
 
         if use_rts and len(tracker.history) > 0:
-            print("      Applying RTS Backward Smoother over 10D UKF history...")
-            smoother = RTSSmoother10D()
+            eff_lag = None if (rts_lag is not None and rts_lag < 0) else rts_lag
+            if eff_lag is not None and eff_lag > 0:
+                print(
+                    f"      Applying Sliding-Window RTS Smoother (lag={eff_lag} frames / {eff_lag * dt * 1000.0:.0f} ms)..."
+                )
+            else:
+                print("      Applying RTS Backward Smoother over 10D UKF history...")
+            smoother = RTSSmoother10D(lag_frames=eff_lag)
             smoothed = smoother.smooth(tracker.history)
             out_df = smoother.to_dataframe(smoothed)
         else:
@@ -906,6 +960,11 @@ def main():
     parser = argparse.ArgumentParser(description="Peleng 3D Real-Time Tracking Core")
     parser.add_argument("--calib-dir", default=default_calib, help="Directory with camera calibration CSV files")
     parser.add_argument(
+        "--videos-dir",
+        default=None,
+        help="Optional directory with N camera video streams to run live 2D detection + 3D tracking end-to-end",
+    )
+    parser.add_argument(
         "--detections",
         default="results/detections/detections_2d_yolo26_seg.csv",
         help="Path to 2D detections CSV",
@@ -928,6 +987,12 @@ def main():
     )
     parser.add_argument("--tracker-type", choices=["ukf", "linear"], default="ukf", help="Tracker engine type")
     parser.add_argument("--no-rts", action="store_false", dest="use_rts", help="Disable RTS backward smoother")
+    parser.add_argument(
+        "--rts-lag",
+        type=int,
+        default=30,
+        help="Sliding-window RTS lag in frames for streaming video (default: 30 frames = 1.0s; -1 for full batch)",
+    )
     parser.add_argument(
         "--realtime",
         action="store_true",
@@ -954,8 +1019,10 @@ def main():
         conf_threshold=args.conf_threshold,
         tracker_type=args.tracker_type,
         use_rts=args.use_rts,
+        rts_lag=args.rts_lag,
         realtime_only=args.realtime_only,
         road_spline_path=args.road_spline,
+        videos_dir=args.videos_dir,
     )
 
 

@@ -247,8 +247,8 @@ runs/**/weights/
 data/raw/**/*.mp4
 data/datasets/
 data/archives/
-dataset/
-dataset*/
+/dataset/
+/dataset*/
 peleng.v1i.yolov8/
 *.zip
 debug_*.jpg
@@ -256,6 +256,8 @@ debug_*.jpg
 
 # Large video outputs
 results/videos/
+results/**/videos/
+results/**/*.mp4
 
 # Compiled C++ Python extensions and build artifacts
 *.pyd
