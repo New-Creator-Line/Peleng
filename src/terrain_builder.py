@@ -1045,11 +1045,22 @@ def build_scene_3d_payload(
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     known_specs = [
         {
+            "id": "cabin",
+            "name": "🏆 Поколение 4: Cabin Detector + SOTA (1.48 м)",
+            "short_name": "Cabin Detector + SOTA",
+            "badge": "Поколение 4 (Абсолютный Рекорд)",
+            "desc": "Специализированный детектор кабины + перспективный пивот + UKF. MAE: 1.48 м (на участке кабины: 0.92 м!).",
+            "color": "#22c55e",
+            "traj_csv": os.path.join(repo_root, "results", "trajectories", "output_trajectory_cabin.csv"),
+            "metrics_json": os.path.join(repo_root, "results", "metrics", "metrics_summary_cabin.json"),
+            "det_csv": os.path.join(repo_root, "results", "detections", "detections_2d_cabin.csv"),
+        },
+        {
             "id": "ukf",
-            "name": "⭐ Поколение 3: YOLO26x-seg + 10D UKF (5.39 м)",
+            "name": "⭐ Поколение 3: YOLO26x-seg + 10D UKF (3.51 м)",
             "short_name": "YOLO26x-seg + 10D UKF",
-            "badge": "Поколение 3 (Рекорд)",
-            "desc": "Сегментационные маски + 10D Unscented Kalman Filter + RTS сглаживание. MAE: 5.39 м.",
+            "badge": "Поколение 3",
+            "desc": "Сегментационные маски + 10D Unscented Kalman Filter + RTS сглаживание. MAE: 3.51 м.",
             "color": "#00f5d4",
             "traj_csv": os.path.join(repo_root, "results", "trajectories", "output_trajectory_ukf.csv"),
             "metrics_json": os.path.join(repo_root, "results", "metrics", "metrics_summary_ukf.json"),
@@ -1138,7 +1149,7 @@ def build_scene_3d_payload(
             "frames": frames_payload,
         }
 
-    active_model_key = "ukf" if "ukf" in models_payload else list(models_payload.keys())[0]
+    active_model_key = "cabin" if "cabin" in models_payload else ("ukf" if "ukf" in models_payload else list(models_payload.keys())[0])
 
     return {
         "meta": meta_payload,

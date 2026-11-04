@@ -673,12 +673,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     <div style="margin-bottom: 12px; padding: 10px; background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(0, 245, 212, 0.35); border-radius: 8px;">
       <div class="section-title" style="margin-bottom: 6px; color: #00f5d4; font-size: 11px;">🤖 Выбор Модели и Алгоритма</div>
       <select id="select-active-model" class="speed-select" style="width: 100%; font-size: 11px; padding: 6px 8px; font-weight: 600;">
-        <option value="ukf" selected>⭐ Поколение 3: YOLO26x-seg + 10D UKF (5.39 м)</option>
+        <option value="cabin" selected>🏆 Поколение 4: Cabin Detector + SOTA (1.48 м)</option>
+        <option value="ukf">⭐ Поколение 3: YOLO26x-seg + 10D UKF (3.51 м)</option>
         <option value="rtdetr">🚀 Поколение 2: RT-DETR + Filter (6.14 м)</option>
         <option value="yolo_linear">📦 Поколение 1: YOLOv8x + Linear (6.30 м)</option>
       </select>
       <div id="model-desc-badge" style="font-size: 10px; color: #94a3b8; margin-top: 6px; line-height: 1.35;">
-        <span style="color:#00f5d4;font-weight:700;">YOLO26x-seg + 10D UKF</span>: Маски сегментации, адаптивный кубоид L/W/H, сглаживание RTS. MAE: <b>5.39 м</b> (-90 см).
+        <span style="color:#22c55e;font-weight:700;">Cabin Detector + SOTA</span>: Специализированный детектор кабины, перспективный пивот, UKF. MAE: <b>1.48 м</b> (на мультикамере: <b>0.92 м</b>).
       </div>
     </div>
 
