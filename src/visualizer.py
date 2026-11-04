@@ -7,7 +7,7 @@ Generates:
 """
 
 import os
-from typing import Optional
+from typing import Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd

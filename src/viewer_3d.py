@@ -670,6 +670,18 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       <button id="btn-collapse-left" class="panel-collapse-btn" title="Скрыть панель">[ — Скрыть ]</button>
     </div>
 
+    <div style="margin-bottom: 12px; padding: 10px; background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(0, 245, 212, 0.35); border-radius: 8px;">
+      <div class="section-title" style="margin-bottom: 6px; color: #00f5d4; font-size: 11px;">🤖 Выбор Модели и Алгоритма</div>
+      <select id="select-active-model" class="speed-select" style="width: 100%; font-size: 11px; padding: 6px 8px; font-weight: 600;">
+        <option value="ukf" selected>⭐ Поколение 3: YOLO26x-seg + 10D UKF (5.39 м)</option>
+        <option value="rtdetr">🚀 Поколение 2: RT-DETR + Filter (6.14 м)</option>
+        <option value="yolo_linear">📦 Поколение 1: YOLOv8x + Linear (6.30 м)</option>
+      </select>
+      <div id="model-desc-badge" style="font-size: 10px; color: #94a3b8; margin-top: 6px; line-height: 1.35;">
+        <span style="color:#00f5d4;font-weight:700;">YOLO26x-seg + 10D UKF</span>: Маски сегментации, адаптивный кубоид L/W/H, сглаживание RTS. MAE: <b>5.39 м</b> (-90 см).
+      </div>
+    </div>
+
     <div>
       <div class="section-title">Camera View Presets</div>
       <div class="preset-grid" id="camera-presets">
@@ -928,7 +940,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     const SCENE_DATA = window.SCENE_DATA || {};
     const meta = SCENE_DATA.meta || {};
     const metrics = SCENE_DATA.metrics || {};
-    const frames = SCENE_DATA.frames || [];
+    let frames = SCENE_DATA.frames || [];
     const camerasData = SCENE_DATA.cameras || {};
     const hasGT = Boolean(meta.has_ground_truth);
     const originCenter = meta.origin_center_cm || [0.0, 0.0, 0.0];
@@ -2638,6 +2650,62 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         selectSpeed.addEventListener('change', e => {
           playbackSpeed = parseFloat(e.target.value);
           saveViewerSettings();
+        });
+      }
+
+      // Bind model selector listener
+      const selectModel = document.getElementById('select-active-model');
+      if (selectModel) {
+        const modelsData = SCENE_DATA.models || null;
+        if (modelsData && Object.keys(modelsData).length > 0) {
+          selectModel.innerHTML = '';
+          Object.keys(modelsData).forEach(mId => {
+            const m = modelsData[mId];
+            const opt = document.createElement('option');
+            opt.value = mId;
+            opt.textContent = m.name || mId;
+            if (mId === (SCENE_DATA.active_model || 'ukf')) opt.selected = true;
+            selectModel.appendChild(opt);
+          });
+        }
+        selectModel.addEventListener('change', e => {
+          const mKey = e.target.value;
+          const models = SCENE_DATA.models || {};
+          const chosen = models[mKey];
+          if (chosen && chosen.frames) {
+            frames = chosen.frames;
+            slider.max = String(Math.max(0, frames.length - 1));
+            const descEl = document.getElementById('model-desc-badge');
+            if (descEl) {
+              descEl.innerHTML = `<span style="color:${chosen.color || '#00f5d4'};font-weight:700;">${chosen.short_name || chosen.name}</span>: ${chosen.desc || ''}`;
+            }
+            if (chosen.metrics) {
+              const m = chosen.metrics;
+              const mae = Number(m.mae_3d || 0);
+              const rmse = Number(m.rmse_3d || 0);
+              const elMae = document.getElementById('sum-mae3d');
+              if (elMae) elMae.textContent = `${mae.toFixed(1)} cm (${(mae / 100).toFixed(2)} m)`;
+              const elRmse = document.getElementById('sum-rmse3d');
+              if (elRmse) elRmse.textContent = `${rmse.toFixed(1)} cm (${(rmse / 100).toFixed(2)} m)`;
+              const elAxes = document.getElementById('sum-axes');
+              if (elAxes && m.mae_x !== undefined) {
+                elAxes.textContent = `${Number(m.mae_x || 0).toFixed(1)} / ${Number(m.mae_y || 0).toFixed(1)} / ${Number(m.mae_z || 0).toFixed(1)}`;
+              }
+            }
+            const rawEst = [];
+            frames.forEach(f => {
+              if (f.est_pos_cm) {
+                const p = ueToThree(f.est_pos_cm);
+                rawEst.push(new THREE.Vector3(p.x, p.y + 0.55, p.z));
+              }
+            });
+            const cleanEst = deduplicatePoints(rawEst);
+            if (cleanEst.length >= 2) {
+              estCurve = new THREE.CatmullRomCurve3(cleanEst);
+            }
+            rebuildTrajectories(currentTrajRadius, currentTrajStyle);
+            updateFrameState(currentFrameIdx);
+          }
         });
       }
 

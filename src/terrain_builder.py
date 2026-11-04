@@ -563,6 +563,114 @@ def _compute_headings_rad(traj_pts: np.ndarray) -> np.ndarray:
     return headings
 
 
+def _build_model_frames_data(
+    traj_df: pd.DataFrame,
+    cameras: Dict[int, Any],
+    has_gt: bool,
+    gt_map: Dict[int, np.ndarray],
+    grouped_dets: Optional[Dict[int, List[Dict[str, float]]]],
+    dynamic_cameras_by_frame: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    df_clean = traj_df.copy()
+    df_clean.columns = [str(c).strip() for c in df_clean.columns]
+    df_clean = df_clean.sort_values("Frame").reset_index(drop=True)
+    pts = df_clean[["Loc_X", "Loc_Y", "Loc_Z"]].to_numpy(dtype=np.float64)
+    f_indices = df_clean["Frame"].astype(int).to_numpy()
+    h_rads = _compute_headings_rad(pts)
+
+    res_frames: List[Dict[str, Any]] = []
+    for idx, f_id in enumerate(f_indices):
+        f_int = int(f_id)
+        pt = pts[idx]
+        pos_list = [round(float(pt[0]), 2), round(float(pt[1]), 2), round(float(pt[2]), 2)]
+
+        gt_list: Optional[List[float]] = None
+        err_cm: Optional[float] = None
+        if has_gt and f_int in gt_map:
+            g = gt_map[f_int]
+            gt_list = [round(float(g[0]), 2), round(float(g[1]), 2), round(float(g[2]), 2)]
+            err_cm = round(float(np.linalg.norm(pt - g)), 2)
+
+        active_rays: List[Dict[str, Any]] = []
+        if grouped_dets is not None:
+            obs_list = grouped_dets.get(f_int, [])
+            best_by_cam: Dict[int, Dict[str, float]] = {}
+            for obs in obs_list:
+                cid = int(obs.get("cam_id", -1))
+                conf = float(obs.get("conf", 0.0))
+                if cid in cameras and conf >= 0.3:
+                    if cid not in best_by_cam or conf > best_by_cam[cid]["conf"]:
+                        best_by_cam[cid] = obs
+
+            for cid, obs in sorted(best_by_cam.items()):
+                cam_m = cameras[cid].get_model(f_int)
+                u_val = float(obs["u"])
+                v_val = float(obs["v"])
+                conf_val = float(obs["conf"])
+                ray_dir = _pixel_to_ray(cam_m, u_val, v_val)
+                dist_to_est = float(np.linalg.norm(pt - cam_m.loc))
+                ray_end = cam_m.loc + ray_dir * max(1000.0, dist_to_est)
+                if float(np.linalg.norm(ray_end - pt)) < 1500.0:
+                    end_cm_list = pos_list
+                else:
+                    end_cm_list = [
+                        round(float(ray_end[0]), 2),
+                        round(float(ray_end[1]), 2),
+                        round(float(ray_end[2]), 2),
+                    ]
+                active_rays.append({
+                    "cam_id": int(cid),
+                    "origin_cm": [
+                        round(float(cam_m.loc[0]), 2),
+                        round(float(cam_m.loc[1]), 2),
+                        round(float(cam_m.loc[2]), 2),
+                    ],
+                    "dir": [
+                        round(float(ray_dir[0]), 4),
+                        round(float(ray_dir[1]), 4),
+                        round(float(ray_dir[2]), 4),
+                    ],
+                    "end_cm": end_cm_list,
+                    "u": round(u_val, 2),
+                    "v": round(v_val, 2),
+                    "conf": round(conf_val, 3),
+                })
+        else:
+            for cid, timeline in sorted(cameras.items()):
+                cam_m = timeline.get_model(f_int)
+                u_p, v_p, z_c = cam_m.project_point(pt)
+                if z_c > 100.0 and (0.0 <= u_p < cam_m.image_width_px) and (0.0 <= v_p < cam_m.image_height_px):
+                    ray_dir = _pixel_to_ray(cam_m, u_p, v_p)
+                    active_rays.append({
+                        "cam_id": int(cid),
+                        "origin_cm": [
+                            round(float(cam_m.loc[0]), 2),
+                            round(float(cam_m.loc[1]), 2),
+                            round(float(cam_m.loc[2]), 2),
+                        ],
+                        "dir": [
+                            round(float(ray_dir[0]), 4),
+                            round(float(ray_dir[1]), 4),
+                            round(float(ray_dir[2]), 4),
+                        ],
+                        "end_cm": pos_list,
+                        "u": round(float(u_p), 2),
+                        "v": round(float(v_p), 2),
+                        "conf": 1.0,
+                    })
+
+        res_frames.append({
+            "frame": f_int,
+            "est_pos_cm": pos_list,
+            "gt_pos_cm": gt_list,
+            "heading_rad": round(float(h_rads[idx]), 4),
+            "error_cm": err_cm,
+            "active_rays": active_rays,
+            "dynamic_cameras": dynamic_cameras_by_frame.get(f_int, {}),
+        })
+    return res_frames
+
+
 def build_scene_3d_payload(
     calib_dir: str,
     estimated_df: pd.DataFrame,
@@ -755,117 +863,30 @@ def build_scene_3d_payload(
         ref_frame=ref_frame,
     )
 
-    headings = _compute_headings_rad(traj_pts)
-    frames_payload: List[Dict[str, Any]] = []
-
-    for idx, f_id in enumerate(frame_indices):
+    # Precompute dynamic camera poses across timeline
+    dynamic_cameras_by_frame: Dict[int, Dict[str, Any]] = {}
+    for f_id in frame_indices:
         f_int = int(f_id)
-        est_pt = traj_pts[idx]
-        est_pos_list = [
-            round(float(est_pt[0]), 2),
-            round(float(est_pt[1]), 2),
-            round(float(est_pt[2]), 2),
-        ]
-
-        gt_pos_list: Optional[List[float]] = None
-        error_cm: Optional[float] = None
-        if has_gt and f_int in gt_map:
-            gt_pt = gt_map[f_int]
-            gt_pos_list = [
-                round(float(gt_pt[0]), 2),
-                round(float(gt_pt[1]), 2),
-                round(float(gt_pt[2]), 2),
-            ]
-            error_cm = round(float(np.linalg.norm(est_pt - gt_pt)), 2)
-
-        active_rays: List[Dict[str, Any]] = []
-        if grouped_detections is not None:
-            obs_list = grouped_detections.get(f_int, [])
-            best_by_cam: Dict[int, Dict[str, float]] = {}
-            for obs in obs_list:
-                cid = int(obs.get("cam_id", -1))
-                conf = float(obs.get("conf", 0.0))
-                if cid in cameras and conf >= 0.3:
-                    if cid not in best_by_cam or conf > best_by_cam[cid]["conf"]:
-                        best_by_cam[cid] = obs
-
-            for cid, obs in sorted(best_by_cam.items()):
-                cam_m = cameras[cid].get_model(f_int)
-                u_val = float(obs["u"])
-                v_val = float(obs["v"])
-                conf_val = float(obs["conf"])
-                ray_dir = _pixel_to_ray(cam_m, u_val, v_val)
-                dist_to_est = float(np.linalg.norm(est_pt - cam_m.loc))
-                ray_end = cam_m.loc + ray_dir * max(1000.0, dist_to_est)
-                if float(np.linalg.norm(ray_end - est_pt)) < 1500.0:
-                    end_cm_list = est_pos_list
-                else:
-                    end_cm_list = [
-                        round(float(ray_end[0]), 2),
-                        round(float(ray_end[1]), 2),
-                        round(float(ray_end[2]), 2),
-                    ]
-                active_rays.append({
-                    "cam_id": int(cid),
-                    "origin_cm": [
-                        round(float(cam_m.loc[0]), 2),
-                        round(float(cam_m.loc[1]), 2),
-                        round(float(cam_m.loc[2]), 2),
-                    ],
-                    "dir": [
-                        round(float(ray_dir[0]), 4),
-                        round(float(ray_dir[1]), 4),
-                        round(float(ray_dir[2]), 4),
-                    ],
-                    "end_cm": end_cm_list,
-                    "u": round(u_val, 2),
-                    "v": round(v_val, 2),
-                    "conf": round(conf_val, 3),
-                })
-        else:
-            for cid, timeline in sorted(cameras.items()):
-                cam_m = timeline.get_model(f_int)
-                u_p, v_p, z_c = cam_m.project_point(est_pt)
-                if z_c > 100.0 and (0.0 <= u_p < cam_m.image_width_px) and (0.0 <= v_p < cam_m.image_height_px):
-                    ray_dir = _pixel_to_ray(cam_m, u_p, v_p)
-                    active_rays.append({
-                        "cam_id": int(cid),
-                        "origin_cm": [
-                            round(float(cam_m.loc[0]), 2),
-                            round(float(cam_m.loc[1]), 2),
-                            round(float(cam_m.loc[2]), 2),
-                        ],
-                        "dir": [
-                            round(float(ray_dir[0]), 4),
-                            round(float(ray_dir[1]), 4),
-                            round(float(ray_dir[2]), 4),
-                        ],
-                        "end_cm": est_pos_list,
-                        "u": round(float(u_p), 2),
-                        "v": round(float(v_p), 2),
-                        "conf": 1.0,
-                    })
-
-        dynamic_cameras_frame: Dict[str, Any] = {}
+        d_frame: Dict[str, Any] = {}
         for cid in dynamic_cam_ids:
             cam_m = cameras[cid].get_model(f_int)
             fwd, right, up = _camera_basis_vectors(cam_m)
-            dynamic_cameras_frame[str(cid)] = {
+            d_frame[str(cid)] = {
                 "forward": [round(float(fwd[0]), 4), round(float(fwd[1]), 4), round(float(fwd[2]), 4)],
                 "right": [round(float(right[0]), 4), round(float(right[1]), 4), round(float(right[2]), 4)],
                 "up": [round(float(up[0]), 4), round(float(up[1]), 4), round(float(up[2]), 4)],
                 "frustum_corners_cm": _compute_frustum_corners(cam_m, FRUSTUM_DISTANCE_CM),
             }
+        dynamic_cameras_by_frame[f_int] = d_frame
 
-        frames_payload.append({
-            "frame": f_int,
-            "est_pos_cm": est_pos_list,
-            "gt_pos_cm": gt_pos_list,
-            "heading_rad": round(float(headings[idx]), 4),
-            "error_cm": error_cm,
-            "active_rays": active_rays,
-            "dynamic_cameras": dynamic_cameras_frame,
-        })
+    frames_payload = _build_model_frames_data(
+        traj_df=est_df,
+        cameras=cameras,
+        has_gt=has_gt,
+        gt_map=gt_map,
+        grouped_dets=grouped_detections,
+        dynamic_cameras_by_frame=dynamic_cameras_by_frame,
+    )
 
     metrics_payload: Dict[str, Any] = {
         "mae_3d": 0.0,
@@ -1019,6 +1040,106 @@ def build_scene_3d_payload(
             "stats": {"vertex_count": 0, "face_count": 0, "runtime_ms": 0.0},
         }
 
+    # Discover available tracker models across generations for interactive comparison
+    models_payload: Dict[str, Any] = {}
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    known_specs = [
+        {
+            "id": "ukf",
+            "name": "⭐ Поколение 3: YOLO26x-seg + 10D UKF (5.39 м)",
+            "short_name": "YOLO26x-seg + 10D UKF",
+            "badge": "Поколение 3 (Рекорд)",
+            "desc": "Сегментационные маски + 10D Unscented Kalman Filter + RTS сглаживание. MAE: 5.39 м.",
+            "color": "#00f5d4",
+            "traj_csv": os.path.join(repo_root, "results", "trajectories", "output_trajectory_ukf.csv"),
+            "metrics_json": os.path.join(repo_root, "results", "metrics", "metrics_summary_ukf.json"),
+            "det_csv": os.path.join(repo_root, "results", "detections", "detections_2d_yolo26_seg.csv"),
+        },
+        {
+            "id": "rtdetr",
+            "name": "🚀 Поколение 2: RT-DETR Transformer (6.14 м)",
+            "short_name": "RT-DETR + Filter",
+            "badge": "Поколение 2",
+            "desc": "Трансформерный детектор RT-DETR + фильтр окклюзий веток + Калман. MAE: 6.14 м.",
+            "color": "#a855f7",
+            "traj_csv": os.path.join(repo_root, "results", "trajectories", "output_trajectory_rtdetr.csv"),
+            "metrics_json": os.path.join(repo_root, "results", "metrics", "metrics_summary_rtdetr.json"),
+            "det_csv": os.path.join(repo_root, "results", "detections", "detections_2d_rtdetr.csv"),
+        },
+        {
+            "id": "yolo_linear",
+            "name": "📦 Поколение 1: YOLOv8x + Linear (6.30 м)",
+            "short_name": "YOLOv8x + Linear 3D",
+            "badge": "Поколение 1",
+            "desc": "YOLOv8x Bounding Boxes + аналитический 6D линейный фильтр Калмана. MAE: 6.30 м.",
+            "color": "#38bdf8",
+            "traj_csv": os.path.join(repo_root, "results", "trajectories", "output_trajectory_yolo.csv"),
+            "metrics_json": os.path.join(repo_root, "results", "metrics", "metrics_summary_yolo.json"),
+            "det_csv": os.path.join(repo_root, "results", "detections", "detections_2d_yolo_real.csv"),
+        },
+    ]
+
+    try:
+        from src.mock_detections import load_detections
+    except ImportError:
+        load_detections = None
+
+    for spec in known_specs:
+        m_id = spec["id"]
+        t_path = spec["traj_csv"]
+        met_path = spec["metrics_json"]
+        d_path = spec["det_csv"]
+
+        if os.path.exists(t_path):
+            try:
+                m_df = pd.read_csv(t_path, sep=None, engine="python")
+                m_metrics = dict(metrics_payload)
+                if os.path.exists(met_path):
+                    with open(met_path, "r", encoding="utf-8") as mf:
+                        m_metrics = json.load(mf)
+
+                m_dets = None
+                if load_detections is not None and os.path.exists(d_path):
+                    try:
+                        m_dets = load_detections(d_path)
+                    except Exception:
+                        m_dets = None
+
+                m_frames = _build_model_frames_data(
+                    traj_df=m_df,
+                    cameras=cameras,
+                    has_gt=has_gt,
+                    gt_map=gt_map,
+                    grouped_dets=m_dets if m_dets is not None else grouped_detections,
+                    dynamic_cameras_by_frame=dynamic_cameras_by_frame,
+                )
+                models_payload[m_id] = {
+                    "id": m_id,
+                    "name": spec["name"],
+                    "short_name": spec["short_name"],
+                    "badge": spec["badge"],
+                    "desc": spec["desc"],
+                    "color": spec["color"],
+                    "metrics": m_metrics,
+                    "frames": m_frames,
+                }
+            except Exception:
+                pass
+
+    if not models_payload:
+        models_payload["current"] = {
+            "id": "current",
+            "name": "Текущий запуск",
+            "short_name": "Current",
+            "badge": "Active",
+            "desc": "Результаты текущего запуска пайплайна",
+            "color": "#00f5d4",
+            "metrics": metrics_payload,
+            "frames": frames_payload,
+        }
+
+    active_model_key = "ukf" if "ukf" in models_payload else list(models_payload.keys())[0]
+
     return {
         "meta": meta_payload,
         "metrics": metrics_payload,
@@ -1035,4 +1156,6 @@ def build_scene_3d_payload(
         "cameras": cameras_payload,
         "frames": frames_payload,
         "terrain_methods": terrain_methods,
+        "models": models_payload,
+        "active_model": active_model_key,
     }
