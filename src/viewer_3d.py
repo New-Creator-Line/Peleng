@@ -2034,6 +2034,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         const rig = cameraRigMap[String(camKey)];
         const dynState = dynCams[camKey];
         if (rig && dynState) {
+          if (dynState.rot_deg) {
+            rig.currentRotDeg = dynState.rot_deg;
+          }
           if (dynState.frustum_corners_cm) {
             const newVerts = computeFrustumLinePositions(rig.posThree, dynState.frustum_corners_cm);
             rig.frustumGeom.attributes.position.array.set(newVerts);
@@ -2092,11 +2095,12 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         const camKey = activeCameraPreset.replace('cam_', '');
         const rig = cameraRigMap[camKey];
         if (rig) {
+          const rotDeg = rig.currentRotDeg || (dynCams[camKey] && dynCams[camKey].rot_deg) || rig.info.rot_deg;
           let lookDir, upDir;
-          if (rig.info.rot_deg) {
-            const r = THREE.MathUtils.degToRad(rig.info.rot_deg[0]);
-            const p = THREE.MathUtils.degToRad(rig.info.rot_deg[1]);
-            const y = THREE.MathUtils.degToRad(rig.info.rot_deg[2]);
+          if (rotDeg) {
+            const r = THREE.MathUtils.degToRad(rotDeg[0]);
+            const p = THREE.MathUtils.degToRad(rotDeg[1]);
+            const y = THREE.MathUtils.degToRad(rotDeg[2]);
             const forwardUE = [
               Math.cos(p) * Math.cos(y),
               Math.cos(p) * Math.sin(y),
@@ -2320,11 +2324,12 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         if (rig) {
           controls.enabled = false;
 
+          const rotDeg = rig.currentRotDeg || rig.info.rot_deg;
           let lookDir, upDir;
-          if (rig.info.rot_deg) {
-            const r = THREE.MathUtils.degToRad(rig.info.rot_deg[0]);
-            const p = THREE.MathUtils.degToRad(rig.info.rot_deg[1]);
-            const y = THREE.MathUtils.degToRad(rig.info.rot_deg[2]);
+          if (rotDeg) {
+            const r = THREE.MathUtils.degToRad(rotDeg[0]);
+            const p = THREE.MathUtils.degToRad(rotDeg[1]);
+            const y = THREE.MathUtils.degToRad(rotDeg[2]);
             const forwardUE = [
               Math.cos(p) * Math.cos(y),
               Math.cos(p) * Math.sin(y),

@@ -905,6 +905,11 @@ def build_scene_3d_payload(
             cam_m = cameras[cid].get_model(f_int)
             fwd, right, up = _camera_basis_vectors(cam_m)
             d_frame[str(cid)] = {
+                "rot_deg": [
+                    round(float(cam_m.rot[0]), 4),
+                    round(float(cam_m.rot[1]), 4),
+                    round(float(cam_m.rot[2]), 4),
+                ],
                 "forward": [round(float(fwd[0]), 4), round(float(fwd[1]), 4), round(float(fwd[2]), 4)],
                 "right": [round(float(right[0]), 4), round(float(right[1]), 4), round(float(right[2]), 4)],
                 "up": [round(float(up[0]), 4), round(float(up[1]), 4), round(float(up[2]), 4)],
