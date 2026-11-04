@@ -327,7 +327,7 @@ def process_all_videos(
                             up, vp, zc = cameras[c_id].get_model(frame_idx).project_point(traj_3d_map[frame_idx])
                             if zc > 0:
                                 proj_uv = (up, vp)
-                        label = "yolo26-seg"
+                        label = d.get('label') or ("cabin" if "cabin" in (detections_csv or "").lower() else "truck")
                         draw_detection(frame, tuple(xyxy), conf, c_id, frame_idx, label=label, is_occluded=vis_occ, proj_3d_uv=proj_uv)
                         detection_records.append({
                             "Frame": frame_idx, "Cam_ID": c_id,
