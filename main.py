@@ -313,8 +313,6 @@ def _reconstruct_pass(
         elif tracker.is_initialized and valid_obs:
             # Single-camera ray tracking when occluded on other cameras
             tracker.x[5] *= 0.7
-            if hasattr(tracker, 'sync_to_cpp'):
-                tracker.sync_to_cpp()
             pred_pt = tracker.predict()
             target_z = float(pred_pt[2] - cabin_z_shift)
             best_single_pt = None

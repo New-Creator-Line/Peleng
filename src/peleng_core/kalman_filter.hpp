@@ -158,14 +158,6 @@ public:
         return {x_[3], x_[4], x_[5]};
     }
 
-    [[nodiscard]] std::array<double, 6> get_state() const noexcept {
-        return x_;
-    }
-
-    void set_state(const std::array<double, 6>& state) noexcept {
-        x_ = state;
-    }
-
 private:
     void init_matrices() noexcept {
         for (size_t i = 0; i < 6; ++i) {

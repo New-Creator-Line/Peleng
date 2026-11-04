@@ -113,27 +113,6 @@ public:
         };
     }
 
-    [[nodiscard]] std::optional<Vec3> project_ray_to_z(double u, double v, double target_z = 0.0) const noexcept {
-        const double cx = img_w_px_ / 2.0;
-        const double cy = img_h_px_ / 2.0;
-        const double fx = focal_length_mm_ * img_w_px_ / sensor_w_mm_;
-        const double fy = focal_length_mm_ * img_h_px_ / sensor_h_mm_;
-
-        const double rx = (u - cx) / fx;
-        const double ry = (v - cy) / fy;
-        constexpr double rz = 1.0;
-
-        const double dx = R_cam_[0][0] * rx + R_cam_[1][0] * ry + R_cam_[2][0] * rz;
-        const double dy = R_cam_[0][1] * rx + R_cam_[1][1] * ry + R_cam_[2][1] * rz;
-        const double dz = R_cam_[0][2] * rx + R_cam_[1][2] * ry + R_cam_[2][2] * rz;
-
-        if (std::abs(dz) < 1e-6) return std::nullopt;
-        const double s = (target_z - loc_.z) / dz;
-        if (s <= 0.0) return std::nullopt;
-
-        return Vec3{ loc_.x + s * dx, loc_.y + s * dy, loc_.z + s * dz };
-    }
-
 private:
     void compute_matrices() noexcept {
         const double fx = focal_length_mm_ * img_w_px_ / sensor_w_mm_;

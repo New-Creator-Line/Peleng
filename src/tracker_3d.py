@@ -57,13 +57,6 @@ class KalmanFilter3D:
 
         # State vector x (6,)
         self.x = np.zeros(6, dtype=np.float64)
-        if HAS_CPP_CORE:
-            try:
-                self._cpp_tracker = peleng_core.KalmanTracker3D(self.dt, self.process_noise_std, self.measurement_noise_std)
-            except Exception:
-                self._cpp_tracker = None
-        else:
-            self._cpp_tracker = None
 
     def initialize(self, init_pos_3d: np.ndarray, init_vel_3d: Optional[np.ndarray] = None) -> None:
         self.x[:3] = np.asarray(init_pos_3d, dtype=np.float64)
@@ -72,23 +65,12 @@ class KalmanFilter3D:
         else:
             self.x[3:] = 0.0
 
-        if self._cpp_tracker is not None:
-            self._cpp_tracker.initialize(self.x[:3], self.x[3:])
         self.P = np.eye(6, dtype=np.float64) * 10.0
         self.is_initialized = True
-
-    def sync_to_cpp(self) -> None:
-        if self._cpp_tracker is not None and self.is_initialized:
-            self._cpp_tracker.set_state(np.asarray(self.x, dtype=np.float64))
 
     def predict(self) -> np.ndarray:
         if not self.is_initialized:
             return np.zeros(3)
-
-        if self._cpp_tracker is not None:
-            pos = self._cpp_tracker.predict()
-            self.x = np.asarray(self._cpp_tracker.get_state(), dtype=np.float64)
-            return pos
 
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
@@ -98,11 +80,6 @@ class KalmanFilter3D:
         if not self.is_initialized:
             self.initialize(measurement_3d)
             return self.x[:3].copy()
-
-        if self._cpp_tracker is not None:
-            pos = self._cpp_tracker.update(np.asarray(measurement_3d, dtype=np.float64), float(noise_scale))
-            self.x = np.asarray(self._cpp_tracker.get_state(), dtype=np.float64)
-            return pos
 
         z = np.asarray(measurement_3d, dtype=np.float64)
         R = self.R * max(0.1, float(noise_scale))
