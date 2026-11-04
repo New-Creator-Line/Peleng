@@ -335,9 +335,25 @@ def run_study() -> Dict[str, Any]:
         m["coverage_pct"] = 100.0 * float(np.mean(np.all(np.isfinite(pred_xyz), axis=1)))
         model_results[name] = m
 
+    # Add top breakthrough model: Peleng Cabin UKF (Anisotropic Covariance)
+    cabin_csv = "results/trajectories/output_trajectory_cabin.csv"
+    if os.path.exists(cabin_csv):
+        cab_df = pd.read_csv(cabin_csv, sep=";")
+        cab_xyz = cab_df[["Loc_X", "Loc_Y", "Loc_Z"]].to_numpy(dtype=np.float64)
+        cab_name = "Peleng Cabin UKF (1.06m)"
+        trajectories[cab_name] = cab_xyz
+        traj_dfs[cab_name] = cab_df
+        m_cab = compute_detailed_metrics(cab_xyz, gt_xyz)
+        m_cab["rel_path_pct"] = 100.0 * m_cab["mae_3d"] / total_path_len
+        m_cab["rel_truck_len_pct"] = 100.0 * m_cab["mae_3d"] / truck_len
+        m_cab["coverage_pct"] = 100.0 * float(np.mean(np.all(np.isfinite(cab_xyz), axis=1)))
+        model_results[cab_name] = m_cab
+
     # Compute geometric consistency & 3D ellipsoid metrics on primary model
-    primary_key = "YOLO26-seg (Two-Pass + RTS)"
-    primary_csv = "results/detections/detections_2d_yolo26_seg.csv"
+    primary_key = "Peleng Cabin UKF (1.06m)" if "Peleng Cabin UKF (1.06m)" in trajectories else "YOLO26-seg (Two-Pass + RTS)"
+    primary_csv = "results/detections/detections_2d_cabin.csv" if os.path.exists("results/detections/detections_2d_cabin.csv") else "results/detections/detections_2d_yolo26_seg.csv"
+    if primary_csv not in dets_cache:
+        dets_cache[primary_csv] = load_detections(primary_csv)
     geo_info = compute_geometric_consistency(
         cameras=cameras,
         detections_by_frame=dets_cache[primary_csv],
@@ -362,7 +378,7 @@ def run_study() -> Dict[str, Any]:
     }
 
     regime_results: Dict[str, Dict[str, Dict[str, float]]] = {}
-    for m_name in ["YOLO26-seg (Two-Pass + RTS)", "YOLOv8x (Two-Pass + RTS)", "RT-DETR-l (Two-Pass + RTS)"]:
+    for m_name in ["Peleng Cabin UKF (1.06m)", "YOLO26-seg (Two-Pass + RTS)", "YOLOv8x (Two-Pass + RTS)", "RT-DETR-l (Two-Pass + RTS)"]:
         if m_name not in trajectories:
             continue
         pred_xyz = trajectories[m_name]
@@ -413,6 +429,7 @@ def run_study() -> Dict[str, Any]:
     ax1.axvspan(866, 1000, color="#9c27b0", alpha=0.10, label="Close-Range Panning")
 
     colors = {
+        "Peleng Cabin UKF (1.06m)": "#00e5ff",
         "YOLO26-seg (Two-Pass + RTS)": "#00c853",
         "YOLOv8x (Two-Pass + RTS)": "#2979ff",
         "RT-DETR-l (Two-Pass + RTS)": "#ff3d00",
@@ -481,11 +498,11 @@ def run_study() -> Dict[str, Any]:
         "IV. Ближняя зона\n(панорамирование)",
     ]
     x_pos = np.arange(len(r_labels))
-    width = 0.26
+    width = 0.19
     for idx, (m_name, color) in enumerate(colors.items()):
         if m_name in regime_results:
             vals = [regime_results[m_name][rk]["mae_3d"] for rk in regimes.keys()]
-            bars = ax4.bar(x_pos + (idx - 1) * width, vals, width, label=m_name, color=color, alpha=0.85)
+            bars = ax4.bar(x_pos + (idx - 1.5) * width, vals, width, label=m_name, color=color, alpha=0.85)
             for b in bars:
                 h_val = b.get_height()
                 ax4.text(b.get_x() + b.get_width() / 2, h_val + 8, f"{h_val:.0f}", ha="center", va="bottom", fontsize=8.5)
