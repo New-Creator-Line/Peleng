@@ -43,8 +43,11 @@ from src.terrain.census_stereo.band_matcher import (
     DEFAULT_BAND_STEP_PX,
     DEFAULT_LEFT_RIGHT_DIST_THRESH_PX,
     DEFAULT_LINE_SAMPLE_STEP_PX,
+    DEFAULT_MAX_CORRIDOR_DEPTH_CM,
     DEFAULT_MAX_COUNTER_FACING_ANGLE_DEG,
     DEFAULT_MAX_HAMMING_COST,
+    DEFAULT_MIN_CENSUS_ENTROPY_BITS,
+    DEFAULT_MIN_CORRIDOR_DEPTH_CM,
     DEFAULT_MIN_SECOND_PEAK_DIST_PX,
     DEFAULT_ROAD_Z_CM,
     DEFAULT_ROAD_Z_MAX_OFFSET_CM,
@@ -149,6 +152,12 @@ class TestSectorMatcherConfig:
         assert cfg.road_z_min_offset_cm == -50.0
         assert cfg.road_z_max_offset_cm == DEFAULT_ROAD_Z_MAX_OFFSET_CM
         assert cfg.road_z_max_offset_cm == 3500.0
+        assert cfg.min_census_entropy_bits == DEFAULT_MIN_CENSUS_ENTROPY_BITS
+        assert cfg.min_census_entropy_bits == 4
+        assert cfg.min_corridor_depth_cm == DEFAULT_MIN_CORRIDOR_DEPTH_CM
+        assert cfg.min_corridor_depth_cm == 10.0
+        assert cfg.max_corridor_depth_cm == DEFAULT_MAX_CORRIDOR_DEPTH_CM
+        assert cfg.max_corridor_depth_cm == 100000.0
 
     def test_invalid_parameters_raise_value_error(self):
         with pytest.raises(ValueError, match="band_half_width_px must be non-negative"):
@@ -177,6 +186,18 @@ class TestSectorMatcherConfig:
 
         with pytest.raises(ValueError, match="road_z_min_offset_cm must be < road_z_max_offset_cm"):
             SectorMatcherConfig(road_z_min_offset_cm=100.0, road_z_max_offset_cm=50.0)
+
+        with pytest.raises(ValueError, match="min_census_entropy_bits must be in"):
+            SectorMatcherConfig(min_census_entropy_bits=-1)
+
+        with pytest.raises(ValueError, match="min_census_entropy_bits must be in"):
+            SectorMatcherConfig(min_census_entropy_bits=25)
+
+        with pytest.raises(ValueError, match="min_corridor_depth_cm must be positive"):
+            SectorMatcherConfig(min_corridor_depth_cm=0.0)
+
+        with pytest.raises(ValueError, match="min_corridor_depth_cm must be positive and < max_corridor_depth_cm"):
+            SectorMatcherConfig(min_corridor_depth_cm=200000.0, max_corridor_depth_cm=100000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +338,7 @@ class TestEpipolarBandMatcherTriFilter:
         patch_size = 25
         half = patch_size // 2
         texture = np.random.randint(20, 240, (patch_size, patch_size), dtype=np.uint8)
+        texture[half, half] = 128  # Balanced center intensity ensuring popcount ~ 24 bits
 
         img1[iv1 - half:iv1 + half + 1, iu1 - half:iu1 + half + 1] = texture
         img2[iv2 - half:iv2 + half + 1, iu2 - half:iu2 + half + 1] = texture
@@ -352,7 +374,7 @@ class TestEpipolarBandMatcherTriFilter:
         img1 = np.full((H, W), 128, dtype=np.uint8)
         img2 = np.random.randint(0, 255, (H, W), dtype=np.uint8)
 
-        matcher = EpipolarBandMatcher(SectorMatcherConfig(max_hamming_cost=9))
+        matcher = EpipolarBandMatcher(SectorMatcherConfig(max_hamming_cost=9, min_census_entropy_bits=0))
         matches = matcher.match_camera_pair(
             cam1,
             cam2,
@@ -472,3 +494,145 @@ class TestEpipolarBandMatcherTriFilter:
         assert len(matches) >= 1
         for m in matches:
             assert m.is_valid()
+
+
+# ---------------------------------------------------------------------------
+# 6. Road Corridor Ray-Casting & Rejection Tests
+# ---------------------------------------------------------------------------
+
+class TestCorridorRayCasting:
+    """Tests road elevation corridor ray-casting, bounds clipping, and out-of-corridor rejection."""
+
+    def test_ray_pointing_into_sky_returns_none(self):
+        """Verifies that rays pointing into the sky away from the road corridor return None."""
+        cam_tower = CameraModel(
+            cam_id=2,
+            loc=np.array([-45000.0, -6500.0, 7900.0]),
+            rot=np.array([0.0, -10.0, 0.0]),
+            focal_length_mm=35.0,
+        )
+        cam_dst = CameraModel(
+            cam_id=1,
+            loc=np.array([-24000.0, 6600.0, 1200.0]),
+            rot=np.array([0.0, 0.0, -70.0]),
+            focal_length_mm=35.0,
+        )
+        matcher = EpipolarBandMatcher()
+
+        # Ray through pixel near top of sensor (v=100) points upwards into the sky
+        endpoints = matcher._cast_ray_to_corridor_segment(cam_tower, cam_dst, (960.0, 100.0))
+        assert endpoints is None
+
+    def test_ray_inside_corridor_returns_valid_endpoints(self, synthetic_camera_pair):
+        """Verifies that a valid road-intersecting ray returns valid (q1, q2) segment endpoints."""
+        cam1, cam2 = synthetic_camera_pair
+        matcher = EpipolarBandMatcher()
+
+        pt_3d = np.array([3000.0, 0.0, 450.0])
+        u1, v1, z1 = cam1.project_point(pt_3d)
+        assert z1 > 0
+
+        endpoints = matcher._cast_ray_to_corridor_segment(cam1, cam2, (u1, v1))
+        assert endpoints is not None
+        q1, q2 = endpoints
+        assert isinstance(q1, np.ndarray) and isinstance(q2, np.ndarray)
+        assert len(q1) == 2 and len(q2) == 2
+
+    def test_horizontal_ray_outside_corridor_returns_none(self):
+        """When dz ~ 0 and camera Z is outside corridor, cast_ray returns None."""
+        cam_high = CameraModel(
+            cam_id=1,
+            loc=np.array([0.0, 0.0, 10000.0]),
+            rot=np.array([0.0, 0.0, 0.0]),
+            focal_length_mm=35.0,
+        )
+        cam_dst = CameraModel(
+            cam_id=2,
+            loc=np.array([0.0, 500.0, 10000.0]),
+            rot=np.array([0.0, 0.0, 0.0]),
+            focal_length_mm=35.0,
+        )
+        matcher = EpipolarBandMatcher()
+        fx, fy, cx, cy = cam_high.get_intrinsics()
+        endpoints = matcher._cast_ray_to_corridor_segment(cam_high, cam_dst, (cx, cy))
+        assert endpoints is None
+
+    def test_horizontal_ray_inside_corridor_returns_endpoints(self):
+        """When dz ~ 0 and camera Z is within corridor [400, 3950], cast_ray returns endpoints."""
+        cam_mid = CameraModel(
+            cam_id=1,
+            loc=np.array([0.0, 0.0, 1000.0]),
+            rot=np.array([0.0, 0.0, 0.0]),
+            focal_length_mm=35.0,
+        )
+        cam_dst = CameraModel(
+            cam_id=2,
+            loc=np.array([0.0, 500.0, 1000.0]),
+            rot=np.array([0.0, 0.0, 0.0]),
+            focal_length_mm=35.0,
+        )
+        matcher = EpipolarBandMatcher()
+        fx, fy, cx, cy = cam_mid.get_intrinsics()
+        endpoints = matcher._cast_ray_to_corridor_segment(cam_mid, cam_dst, (cx, cy))
+        assert endpoints is not None
+
+
+# ---------------------------------------------------------------------------
+# 7. Census Entropy Filter Tests
+# ---------------------------------------------------------------------------
+
+class TestCensusEntropyFilter:
+    """Verifies low-entropy descriptor rejection for textureless and aperture patches."""
+
+    def test_flat_textureless_patch_rejected_by_entropy_filter(self, synthetic_camera_pair):
+        """Completely flat / textureless image patch (popcount = 0) is rejected."""
+        cam1, cam2 = synthetic_camera_pair
+        H, W = 1080, 1920
+
+        img1 = np.full((H, W), 128, dtype=np.uint8)
+        img2 = np.full((H, W), 128, dtype=np.uint8)
+
+        pt_3d = np.array([3000.0, 0.0, 450.0])
+        u1, v1, _ = cam1.project_point(pt_3d)
+
+        matcher = EpipolarBandMatcher(SectorMatcherConfig(min_census_entropy_bits=4))
+        matches = matcher.match_camera_pair(
+            cam1,
+            cam2,
+            img1,
+            img2,
+            keypoints_i=[(u1, v1)],
+        )
+        assert len(matches) == 0
+
+    def test_low_entropy_patch_rejected(self, synthetic_camera_pair):
+        """Patch with popcount < min_census_entropy_bits is rejected."""
+        cam1, cam2 = synthetic_camera_pair
+        H, W = 1080, 1920
+
+        img1 = np.full((H, W), 128, dtype=np.uint8)
+        img2 = np.full((H, W), 128, dtype=np.uint8)
+
+        pt_3d = np.array([3000.0, 0.0, 450.0])
+        u1, v1, _ = cam1.project_point(pt_3d)
+        iu1, iv1 = int(round(u1)), int(round(v1))
+
+        # Only 1 pixel differs from center -> popcount = 1 (< 4)
+        img1[iv1, iu1 + 1] = 50
+        img2[iv1, iu1 + 1] = 50
+
+        matcher = EpipolarBandMatcher(SectorMatcherConfig(min_census_entropy_bits=4))
+        matches = matcher.match_camera_pair(
+            cam1,
+            cam2,
+            img1,
+            img2,
+            keypoints_i=[(float(iu1), float(iv1))],
+        )
+        assert len(matches) == 0
+
+    def test_entropy_filter_disabled_when_zero(self, synthetic_camera_pair):
+        """Setting min_census_entropy_bits = 0 disables entropy filtering."""
+        cfg = SectorMatcherConfig(min_census_entropy_bits=0)
+        assert cfg.min_census_entropy_bits == 0
+

@@ -51,6 +51,9 @@ from src.terrain.census_stereo.reconstructor import (  # noqa: E402
     CensusReconstructor,
     CensusReconstructorConfig,
     RoadElevationModel,
+    _load_or_fallback_frame,
+    _load_trajectory_csv,
+    _resolve_dir,
     build_road_elevation_model,
     dlt_triangulate_point,
     is_point_within_envelope,
@@ -473,3 +476,28 @@ def test_hackathon_end_to_end_reconstruction(hackathon_data_dir):
         z_vals = vertices[:, 2]
         assert np.all(z_vals >= 0.0), "All points must have Z >= 0.0"
         assert np.all(z_vals <= 5000.0), "All points must have Z <= 5000.0"
+
+
+def test_resolve_dir_workspace_and_peleng_candidates():
+    """Verifies that _resolve_dir finds directories in Peleng or Workspace root."""
+    resolved_hackathon = _resolve_dir("хакатон")
+    assert os.path.isdir(resolved_hackathon)
+    assert resolved_hackathon.endswith("хакатон")
+
+
+def test_load_trajectory_csv_discovery():
+    """Verifies that _load_trajectory_csv locates existing trajectory CSV in workspace."""
+    df = _load_trajectory_csv("хакатон")
+    if df is not None:
+        assert "Loc_X" in df.columns
+        assert "Loc_Y" in df.columns
+        assert "Loc_Z" in df.columns
+
+
+def test_load_or_fallback_frame_clean_frame_or_synth():
+    """Verifies that _load_or_fallback_frame returns valid uint8 gray and rgb arrays."""
+    gray, rgb = _load_or_fallback_frame("хакатон", cam_id=1, frame_idx=0, use_clean_frames=True)
+    assert isinstance(gray, np.ndarray) and gray.dtype == np.uint8 and gray.ndim == 2
+    assert isinstance(rgb, np.ndarray) and rgb.dtype == np.uint8 and rgb.ndim == 3
+    assert gray.shape[:2] == rgb.shape[:2]
+

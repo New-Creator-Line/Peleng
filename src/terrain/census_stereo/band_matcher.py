@@ -49,6 +49,10 @@ DEFAULT_ROAD_Z_CM: float = 450.0
 DEFAULT_ROAD_Z_MIN_OFFSET_CM: float = -50.0    # -0.5m in Unreal Engine cm
 DEFAULT_ROAD_Z_MAX_OFFSET_CM: float = 3500.0   # +35.0m in Unreal Engine cm
 
+DEFAULT_MIN_CENSUS_ENTROPY_BITS: int = 4
+DEFAULT_MIN_CORRIDOR_DEPTH_CM: float = 10.0
+DEFAULT_MAX_CORRIDOR_DEPTH_CM: float = 100000.0
+
 DEFAULT_STRICT_PAIR_VALIDATION: bool = True
 DEFAULT_BORDER_MARGIN_PX: int = 4
 DEFAULT_MAX_KEYPOINTS: int = 2000
@@ -81,6 +85,9 @@ class SectorMatcherConfig:
         road_z_cm: Base road elevation in Unreal Engine world coordinates (cm).
         road_z_min_offset_cm: Lower elevation bound relative to road_z_cm (cm).
         road_z_max_offset_cm: Upper elevation bound relative to road_z_cm (cm).
+        min_census_entropy_bits: Minimum required popcount (and maximum num_bits - min_entropy) for code entropy.
+        min_corridor_depth_cm: Minimum optical depth along camera ray for corridor intersection (cm).
+        max_corridor_depth_cm: Maximum optical depth along camera ray for corridor intersection (cm).
         strict_pair_validation: If True, raises ValueError on counter-facing camera pairs.
         border_margin_px: Minimum margin from image borders for candidate sampling.
         max_keypoints: Maximum number of keypoints to extract if not provided by caller.
@@ -100,6 +107,9 @@ class SectorMatcherConfig:
     road_z_cm: float = DEFAULT_ROAD_Z_CM
     road_z_min_offset_cm: float = DEFAULT_ROAD_Z_MIN_OFFSET_CM
     road_z_max_offset_cm: float = DEFAULT_ROAD_Z_MAX_OFFSET_CM
+    min_census_entropy_bits: int = DEFAULT_MIN_CENSUS_ENTROPY_BITS
+    min_corridor_depth_cm: float = DEFAULT_MIN_CORRIDOR_DEPTH_CM
+    max_corridor_depth_cm: float = DEFAULT_MAX_CORRIDOR_DEPTH_CM
     strict_pair_validation: bool = DEFAULT_STRICT_PAIR_VALIDATION
     border_margin_px: int = DEFAULT_BORDER_MARGIN_PX
     max_keypoints: int = DEFAULT_MAX_KEYPOINTS
@@ -141,6 +151,22 @@ class SectorMatcherConfig:
             raise ValueError(
                 f"road_z_min_offset_cm must be < road_z_max_offset_cm, "
                 f"got min={self.road_z_min_offset_cm}, max={self.road_z_max_offset_cm}"
+            )
+        if (
+            self.min_census_entropy_bits < 0
+            or self.min_census_entropy_bits > (self.census_config.num_bits // 2)
+        ):
+            raise ValueError(
+                f"min_census_entropy_bits must be in [0, {self.census_config.num_bits // 2}], "
+                f"got {self.min_census_entropy_bits}"
+            )
+        if (
+            self.min_corridor_depth_cm <= 0.0
+            or self.min_corridor_depth_cm >= self.max_corridor_depth_cm
+        ):
+            raise ValueError(
+                f"min_corridor_depth_cm must be positive and < max_corridor_depth_cm, "
+                f"got min={self.min_corridor_depth_cm}, max={self.max_corridor_depth_cm}"
             )
         if self.border_margin_px < 0:
             raise ValueError(
@@ -331,8 +357,8 @@ class EpipolarBandMatcher:
         z_min = z_road + self.config.road_z_min_offset_cm
         z_max = z_road + self.config.road_z_max_offset_cm
 
-        min_depth = 10.0
-        max_depth = 100000.0
+        min_depth = self.config.min_corridor_depth_cm
+        max_depth = self.config.max_corridor_depth_cm
 
         if abs(d_world[2]) > 1e-9:
             t_min_plane = (z_min - cam_src.loc[2]) / d_world[2]
@@ -343,12 +369,14 @@ class EpipolarBandMatcher:
             t1 = max(t_corridor_1, min_depth)
             t2 = min(t_corridor_2, max_depth)
         else:
-            t1 = min_depth
-            t2 = max_depth
+            if z_min <= cam_src.loc[2] <= z_max:
+                t1 = min_depth
+                t2 = max_depth
+            else:
+                return None
 
         if t1 >= t2 or t2 <= min_depth:
-            t1 = 100.0
-            t2 = 50000.0
+            return None
 
         P1 = cam_src.loc + t1 * d_world
         P2 = cam_src.loc + t2 * d_world
@@ -361,13 +389,12 @@ class EpipolarBandMatcher:
 
         # If one endpoint is behind destination camera, interpolate along ray
         if z1 <= 0.0 or z2 <= 0.0:
-            # Solve for t where point in cam_dst has z_cam = 10.0
+            # Solve for t where point in cam_dst has z_cam = min_depth
             diff_C = cam_src.loc - cam_dst.loc
-            # z_cam_dst(t) = cam_dst.R_cam[2] @ (diff_C + t * d_world)
             r2 = cam_dst.R_cam[2]
             denom = float(np.dot(r2, d_world))
             if abs(denom) > 1e-9:
-                t_clip = (10.0 - float(np.dot(r2, diff_C))) / denom
+                t_clip = (min_depth - float(np.dot(r2, diff_C))) / denom
                 if z1 <= 0.0:
                     t1 = max(t1, t_clip)
                     P1 = cam_src.loc + t1 * d_world
@@ -378,6 +405,9 @@ class EpipolarBandMatcher:
                     u2, v2, z2 = cam_dst.project_point(P2)
             else:
                 return None
+
+        if t1 >= t2:
+            return None
 
         return np.array([u1, v1], dtype=np.float64), np.array([u2, v2], dtype=np.float64)
 
@@ -406,6 +436,15 @@ class EpipolarBandMatcher:
             return None
 
         code_src = desc_map_src[iv_src, iu_src]
+
+        # Low-entropy descriptor rejection (filter out flat / aperture patches)
+        popcount = int(code_src).bit_count()
+        num_bits = self.config.census_config.num_bits
+        if (
+            popcount < self.config.min_census_entropy_bits
+            or popcount > (num_bits - self.config.min_census_entropy_bits)
+        ):
+            return None
 
         # Epipolar line in destination camera: l_dst = F_src_dst @ [u, v, 1]^T
         p_hom_src = np.array([u_src, v_src, 1.0], dtype=np.float64)

@@ -452,19 +452,22 @@ class CensusReconstructor:
 # ---------------------------------------------------------------------------
 
 def _resolve_dir(path: str) -> str:
-    """Resolves directory relative to current working directory or Peleng root."""
+    """Resolves directory relative to current working directory, Peleng root, or workspace root."""
     if os.path.isdir(path):
         return os.path.abspath(path)
 
-    # Check relative to parent directory (Space Hackathon workspace)
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    candidate1 = os.path.join(repo_root, path)
-    if os.path.isdir(candidate1):
-        return candidate1
+    this_file = os.path.abspath(__file__)
+    peleng_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(this_file))))
+    workspace_dir = os.path.dirname(peleng_dir)
 
-    candidate2 = os.path.join(repo_root, "Peleng", path)
-    if os.path.isdir(candidate2):
-        return candidate2
+    candidates = [
+        os.path.join(peleng_dir, path),
+        os.path.join(workspace_dir, path),
+        os.path.join(workspace_dir, "Peleng", path),
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return os.path.abspath(c)
 
     return os.path.abspath(path)
 
@@ -514,15 +517,18 @@ def _load_or_fallback_frame(
     """
     # 1. Clean background frame lookup
     if use_clean_frames:
-        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        this_file = os.path.abspath(__file__)
+        peleng_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(this_file))))
+        workspace_dir = os.path.dirname(peleng_dir)
+
         clean_dirs = []
         if clean_frames_dir:
             clean_dirs.append(_resolve_dir(clean_frames_dir))
         clean_dirs.extend([
             _resolve_dir(os.path.join(video_dir, "clean_background_frames")),
-            os.path.join(repo_root, "project2", "clean_background_frames"),
-            os.path.join(repo_root, "Peleng", "clean_background_frames"),
-            os.path.join(repo_root, "clean_background_frames"),
+            os.path.join(workspace_dir, "project2", "clean_background_frames"),
+            os.path.join(peleng_dir, "clean_background_frames"),
+            os.path.join(workspace_dir, "clean_background_frames"),
         ])
 
         clean_filenames = [
@@ -576,15 +582,24 @@ def _load_or_fallback_frame(
 def _load_trajectory_csv(calib_dir: str) -> Optional[pd.DataFrame]:
     """Attempts to locate and parse vehicle road trajectory CSV."""
     resolved_dir = _resolve_dir(calib_dir)
+    this_file = os.path.abspath(__file__)
+    peleng_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(this_file))))
+    workspace_dir = os.path.dirname(peleng_dir)
+
     candidates = [
         os.path.join(resolved_dir, "object_transform_SM_AA_track.csv"),
         os.path.join(resolved_dir, "target_truck_ground_truth.csv"),
+        os.path.join(peleng_dir, "хакатон", "object_transform_SM_AA_track.csv"),
+        os.path.join(peleng_dir, "хакатон", "target_truck_ground_truth.csv"),
+        os.path.join(workspace_dir, "хакатон", "object_transform_SM_AA_track.csv"),
+        os.path.join(workspace_dir, "хакатон", "target_truck_ground_truth.csv"),
+        os.path.join(workspace_dir, "project2", "target_truck_ground_truth.csv"),
+        os.path.join(workspace_dir, "project2", "object_transform_SM_AA_track.csv"),
+        os.path.join(peleng_dir, "project2", "target_truck_ground_truth.csv"),
+        os.path.join(peleng_dir, "project2", "object_transform_SM_AA_track.csv"),
+        os.path.join(workspace_dir, "all_camera_stereo", "object_transform_SM_AA_track.csv"),
+        os.path.join(peleng_dir, "all_camera_stereo", "object_transform_SM_AA_track.csv"),
     ]
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    candidates.extend([
-        os.path.join(repo_root, "project2", "target_truck_ground_truth.csv"),
-        os.path.join(repo_root, "Peleng", "хакатон", "object_transform_SM_AA_track.csv"),
-    ])
 
     for cpath in candidates:
         if os.path.exists(cpath):
