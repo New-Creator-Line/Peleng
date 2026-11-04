@@ -201,6 +201,8 @@ def process_all_videos(
     conf_threshold: float = 0.35,
     imgsz: int = 960,
     device: str = "0",
+    detections_csv: Optional[str] = None,
+    trajectory_csv: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Simultaneously processes all synchronized camera streams (arbitrary N cameras):
@@ -211,8 +213,35 @@ def process_all_videos(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     Path(csv_output).parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Loading detection model from: {weights_path}")
-    model = load_detection_model(weights_path)
+    model = None
+    precomputed_map: Optional[Dict[Tuple[int, int], List[Dict[str, Any]]]] = None
+    if detections_csv and os.path.exists(detections_csv):
+        logger.info(f"Using precomputed 2D detections from: {detections_csv}")
+        sep = ';' if ';' in open(detections_csv, 'r', encoding='utf-8').readline() else ','
+        df_dets = pd.read_csv(detections_csv, sep=sep)
+        col_m = {c.lower(): c for c in df_dets.columns}
+        f_col = col_m.get('frame', 'Frame')
+        cam_col = col_m.get('cam_id', col_m.get('camera', 'Cam_ID'))
+        u_col = col_m.get('u', col_m.get('x_center', 'u'))
+        v_col = col_m.get('v', col_m.get('y_center', 'v'))
+        w_col = col_m.get('w', col_m.get('width', 'w'))
+        h_col = col_m.get('h', col_m.get('height', 'h'))
+        cf_col = col_m.get('conf', col_m.get('confidence', 'conf'))
+        tr_col = col_m.get('is_truncated', col_m.get('is_occluded', None))
+        precomputed_map = {}
+        for _, row in df_dets.iterrows():
+            f_i = int(row[f_col])
+            c_i = int(row[cam_col])
+            u_v, v_v = float(row[u_col]), float(row[v_col])
+            w_v, h_v = float(row[w_col]), float(row[h_col])
+            cf_v = float(row[cf_col]) if cf_col in row else 0.90
+            tr_v = bool(row[tr_col]) if tr_col and tr_col in row else False
+            precomputed_map.setdefault((f_i, c_i), []).append({
+                'u': u_v, 'v': v_v, 'w': w_v, 'h': h_v, 'conf': cf_v, 'is_occluded': tr_v
+            })
+    else:
+        logger.info(f"Loading detection model from: {weights_path}")
+        model = load_detection_model(weights_path)
 
     cam_videos = discover_camera_videos(videos_dir)
     cam_ids = sorted(cam_videos.keys())
@@ -227,7 +256,8 @@ def process_all_videos(
     except Exception:
         pass
     traj_3d_map: Dict[int, np.ndarray] = {}
-    traj_csv = Path("results/trajectories/output_trajectory_yolo.csv")
+    resolved_traj = trajectory_csv or ("results/trajectories/output_trajectory_yolo26_seg.csv" if os.path.exists("results/trajectories/output_trajectory_yolo26_seg.csv") else "results/trajectories/output_trajectory_yolo.csv")
+    traj_csv = Path(resolved_traj)
     if traj_csv.exists():
         try:
             t_df = pd.read_csv(traj_csv, sep=";")
@@ -278,73 +308,102 @@ def process_all_videos(
                 logger.warning(f"Stream ended early at frame {frame_idx}")
                 break
 
-            frames_list = [raw_frames[c_id] for c_id in cam_ids]
-            results = model.predict(
-                source=frames_list,
-                conf=conf_threshold,
-                imgsz=imgsz,
-                device=device,
-                verbose=False,
-            )
-
             cam_det_counts: Dict[int, int] = {}
             grid_tiles: List[np.ndarray] = []
 
-            for idx, c_id in enumerate(cam_ids):
-                frame = raw_frames[c_id]
-                h_f, w_f = frame.shape[:2]
-                res = results[idx]
-                boxes = res.boxes
-
-                n_dets = 0
-                if boxes is not None and len(boxes) > 0:
-                    for b_idx in range(len(boxes)):
-                        cls_id = int(boxes.cls[b_idx].item())
-                        if cls_id != 0:
-                            continue
-
-                        conf = float(boxes.conf[b_idx].item())
-                        xyxy = boxes.xyxy[b_idx].cpu().numpy().tolist()
-                        xywh = boxes.xywh[b_idx].cpu().numpy().tolist()
-
-                        u, v, w, h = xywh
-                        is_occ, occ_score = estimate_occlusion_status(
-                            float(u), float(v), float(w), float(h), cam_id=c_id, img_w=w_f, img_h=h_f
-                        )
-                        # Visual occlusion badge only when touching border or severely slit (avoid false tag on rear-view Cam 2)
-                        vis_occ = (
-                            xyxy[0] <= 15.0
-                            or xyxy[2] >= w_f - 15.0
-                            or xyxy[1] <= 15.0
-                            or xyxy[3] >= h_f - 15.0
-                            or (w / max(1.0, h) < 0.85)
-                        )
+            if precomputed_map is not None:
+                for idx, c_id in enumerate(cam_ids):
+                    frame = raw_frames[c_id]
+                    h_f, w_f = frame.shape[:2]
+                    dets_for_cam = precomputed_map.get((frame_idx, c_id), [])
+                    n_dets = 0
+                    for d in dets_for_cam:
+                        u, v, w, h = d['u'], d['v'], d['w'], d['h']
+                        conf = d['conf']
+                        vis_occ = bool(d.get('is_occluded', False))
+                        xyxy = [u - w / 2.0, v - h / 2.0, u + w / 2.0, v + h / 2.0]
                         proj_uv = None
                         if frame_idx in traj_3d_map and c_id in cameras:
                             up, vp, zc = cameras[c_id].get_model(frame_idx).project_point(traj_3d_map[frame_idx])
                             if zc > 0:
                                 proj_uv = (up, vp)
-                        label = "cabin" if "cabin" in weights_path.lower() else "truck"
-                        color_box = (0, 230, 255) if label == "cabin" else ((0, 165, 255) if vis_occ else (0, 255, 128))
+                        label = "yolo26-seg"
                         draw_detection(frame, tuple(xyxy), conf, c_id, frame_idx, label=label, is_occluded=vis_occ, proj_3d_uv=proj_uv)
-
                         detection_records.append({
-                            "Frame": frame_idx,
-                            "Cam_ID": c_id,
-                            "u": round(float(u), 2),
-                            "v": round(float(v), 2),
-                            "w": round(float(w), 2),
-                            "h": round(float(h), 2),
-                            "conf": round(float(conf), 4),
-                            "is_occluded": 1 if is_occ else 0,
-                            "occlusion_score": round(occ_score, 3),
+                            "Frame": frame_idx, "Cam_ID": c_id,
+                            "u": round(float(u), 2), "v": round(float(v), 2),
+                            "w": round(float(w), 2), "h": round(float(h), 2),
+                            "conf": round(float(conf), 4), "is_occluded": 1 if vis_occ else 0,
+                            "occlusion_score": 1.0 if vis_occ else 0.0,
                         })
                         n_dets += 1
+                    cam_det_counts[c_id] = n_dets
+                    draw_hud(frame, c_id, frame_idx, total_frames, n_dets)
+                    writers[c_id].write(frame)
+                    grid_tiles.append(cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_AREA))
+            else:
+                frames_list = [raw_frames[c_id] for c_id in cam_ids]
+                results = model.predict(
+                    source=frames_list,
+                    conf=conf_threshold,
+                    imgsz=imgsz,
+                    device=device,
+                    verbose=False,
+                )
+                for idx, c_id in enumerate(cam_ids):
+                    frame = raw_frames[c_id]
+                    h_f, w_f = frame.shape[:2]
+                    res = results[idx]
+                    boxes = res.boxes
 
-                cam_det_counts[c_id] = n_dets
-                draw_hud(frame, c_id, frame_idx, total_frames, n_dets)
-                writers[c_id].write(frame)
-                grid_tiles.append(cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_AREA))
+                    n_dets = 0
+                    if boxes is not None and len(boxes) > 0:
+                        for b_idx in range(len(boxes)):
+                            cls_id = int(boxes.cls[b_idx].item())
+                            if cls_id != 0:
+                                continue
+
+                            conf = float(boxes.conf[b_idx].item())
+                            xyxy = boxes.xyxy[b_idx].cpu().numpy().tolist()
+                            xywh = boxes.xywh[b_idx].cpu().numpy().tolist()
+
+                            u, v, w, h = xywh
+                            is_occ, occ_score = estimate_occlusion_status(
+                                float(u), float(v), float(w), float(h), cam_id=c_id, img_w=w_f, img_h=h_f
+                            )
+                            vis_occ = (
+                                xyxy[0] <= 15.0
+                                or xyxy[2] >= w_f - 15.0
+                                or xyxy[1] <= 15.0
+                                or xyxy[3] >= h_f - 15.0
+                                or (w / max(1.0, h) < 0.85)
+                            )
+                            proj_uv = None
+                            if frame_idx in traj_3d_map and c_id in cameras:
+                                up, vp, zc = cameras[c_id].get_model(frame_idx).project_point(traj_3d_map[frame_idx])
+                                if zc > 0:
+                                    proj_uv = (up, vp)
+                            label = "cabin" if "cabin" in weights_path.lower() else "truck"
+                            draw_detection(frame, tuple(xyxy), conf, c_id, frame_idx, label=label, is_occluded=vis_occ, proj_3d_uv=proj_uv)
+
+                            detection_records.append({
+                                "Frame": frame_idx,
+                                "Cam_ID": c_id,
+                                "u": round(float(u), 2),
+                                "v": round(float(v), 2),
+                                "w": round(float(w), 2),
+                                "h": round(float(h), 2),
+                                "conf": round(float(conf), 4),
+                                "is_occluded": 1 if is_occ else 0,
+                                "occlusion_score": round(occ_score, 3),
+                            })
+                            n_dets += 1
+                    cam_det_counts[c_id] = n_dets
+                    draw_hud(frame, c_id, frame_idx, total_frames, n_dets)
+                    writers[c_id].write(frame)
+                    grid_tiles.append(cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_AREA))
+
+
 
             elapsed = max(0.001, time.perf_counter() - t_start)
             current_fps = (frame_idx + 1) * num_cams / elapsed
@@ -417,6 +476,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conf", type=float, default=0.35)
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--device", type=str, default="0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--detections-csv", type=str, default=None, help="Precomputed detections CSV to render directly")
+    parser.add_argument("--trajectory-csv", type=str, default=None, help="Precomputed 3D trajectory CSV to project onto videos")
     return parser.parse_args()
 
 
@@ -433,6 +494,8 @@ if __name__ == "__main__":
         conf_threshold=args.conf,
         imgsz=args.imgsz,
         device=args.device,
+        detections_csv=args.detections_csv,
+        trajectory_csv=args.trajectory_csv,
     )
     print("\n--- Generation Summary ---")
     print(f"Camera videos saved to: {args.output_dir}/")
