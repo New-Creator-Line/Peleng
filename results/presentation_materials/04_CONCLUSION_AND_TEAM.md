@@ -18,14 +18,17 @@
 
 ---
 
-## 3. Наша команда
+## 3. Команда проекта
 
-| Роль / Направление | Ключевой стек | Зона ответственности |
+* **Командир команды:** Чечулин Кирилл Алексеевич
+* **Горбель Алексей Артёмович**
+* **Александренко Денис Алексеевич**
+
+| Участник | Роль / Направление | Ключевые задачи |
 | :--- | :--- | :--- |
-| **Lead Architect & Math Core** | Python, C++20, Eigen3 | Математика 3D-триангуляции, 10D CTRV UKF, RTS Smoother, калибровка камер |
-| **Computer Vision & DL Engineer** | PyTorch, YOLO26-seg, RT-DETR | Обучение детектора кабины, аугментации, инференс, TensorRT экспорт |
-| **3D Graphics & Spatial Engineer** | Three.js, WebGL, Depth-Anything-V2 | Интерактивный 3D-вьюер, Census Transform Stereo, Space Carving, шейдеры |
-| **QA & Pipeline Integrator** | Pytest, Playwright, NumPy, Pandas | Автоматическое тестирование (187+ тестов), валидация датасетов, бенчмарки |
+| **Чечулин Кирилл Алексеевич** | Капитан & Lead Architect | Архитектура пайплайна, математика 3D-триангуляции, 10D CTRV UKF, калибровка камер |
+| **Горбель Алексей Артёмович** | Computer Vision & DL Engineer | Разработка детектора кабины, обучение нейросетей, аугментации и TensorRT оптимизация |
+| **Александренко Денис Алексеевич** | 3D Graphics & Spatial Systems | Разработка Three.js 3D WebGL-вьюера, Census Transform Stereo, пайплайн валидации и CI/CD |
 
 ---
 
