@@ -817,6 +817,11 @@ def build_scene_3d_payload(
                 round(float(m0.loc[1]), 2),
                 round(float(m0.loc[2]), 2),
             ],
+            "rot_deg": [
+                round(float(m0.rot[0]), 4),
+                round(float(m0.rot[1]), 4),
+                round(float(m0.rot[2]), 4),
+            ],
             "forward": [round(float(fwd[0]), 4), round(float(fwd[1]), 4), round(float(fwd[2]), 4)],
             "right": [round(float(right[0]), 4), round(float(right[1]), 4), round(float(right[2]), 4)],
             "up": [round(float(up[0]), 4), round(float(up[1]), 4), round(float(up[2]), 4)],
@@ -1061,6 +1066,13 @@ def build_scene_3d_payload(
         }
 
     active_model_key = "cabin" if "cabin" in models_payload else ("ukf" if "ukf" in models_payload else list(models_payload.keys())[0])
+
+    if active_model_key in models_payload:
+        active_entry = models_payload[active_model_key]
+        if active_entry.get("frames"):
+            frames_payload = active_entry["frames"]
+        if active_entry.get("metrics"):
+            metrics_payload = active_entry["metrics"]
 
     return {
         "meta": meta_payload,

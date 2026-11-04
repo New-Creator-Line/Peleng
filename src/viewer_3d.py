@@ -974,8 +974,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
     const SCENE_DATA = window.SCENE_DATA || {};
     const meta = SCENE_DATA.meta || {};
-    const metrics = SCENE_DATA.metrics || {};
-    let frames = SCENE_DATA.frames || [];
+    const modelsData = SCENE_DATA.models || {};
+    const defaultModelKey = SCENE_DATA.active_model || 'cabin';
+
+    const initialChosen = modelsData[defaultModelKey] || (Object.keys(modelsData).length > 0 ? Object.values(modelsData)[0] : null);
+    let metrics = (initialChosen && initialChosen.metrics) ? initialChosen.metrics : (SCENE_DATA.metrics || {});
+    let frames = (initialChosen && initialChosen.frames && initialChosen.frames.length > 0)
+      ? initialChosen.frames
+      : (SCENE_DATA.frames || []);
 
     // Running MAE cache for currently active model frames
     let runningMaeArray = [];
@@ -2188,13 +2194,19 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       const hudOverlay = document.getElementById('cam-hud-overlay');
       if (!hudOverlay) return;
 
+      const winW = window.innerWidth;
+      const winH = window.innerHeight;
+
       if (!activeCameraPreset || !activeCameraPreset.startsWith('cam_')) {
+        renderer.setViewport(0, 0, winW, winH);
+        renderer.setScissor(0, 0, winW, winH);
+        renderer.setScissorTest(false);
+        camera.aspect = winW / winH;
+        camera.updateProjectionMatrix();
         hudOverlay.style.display = 'none';
         return;
       }
 
-      const winW = window.innerWidth;
-      const winH = window.innerHeight;
       const targetAspect = 16.0 / 9.0;
       let viewW, viewH, left, top;
 
@@ -2209,6 +2221,21 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         left = 0;
         top = (winH - viewH) / 2;
       }
+
+      renderer.setViewport(left, winH - top - viewH, viewW, viewH);
+      renderer.setScissor(left, winH - top - viewH, viewW, viewH);
+      renderer.setScissorTest(true);
+
+      camera.aspect = targetAspect;
+
+      const camKey = activeCameraPreset.replace('cam_', '');
+      const rig = cameraRigMap[camKey];
+      if (rig) {
+        const focal = Number(rig.info.focal_length_mm || 35.0);
+        const sensorH = 13.365;
+        camera.fov = 2.0 * Math.atan(sensorH / (2.0 * focal)) * (180.0 / Math.PI);
+      }
+      camera.updateProjectionMatrix();
 
       hudOverlay.style.display = 'block';
       hudOverlay.style.left = `${left}px`;
@@ -2233,7 +2260,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
       if (preset === 'orbit') {
         pipCard.classList.remove('visible');
-        if (hudOverlay) hudOverlay.style.display = 'none';
+        updateCameraHudLayout();
         controls.enabled = true;
         camera.fov = 48;
         camera.updateProjectionMatrix();
@@ -2241,7 +2268,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         controls.target.set(0, 5, 0);
       } else if (preset === 'top') {
         pipCard.classList.remove('visible');
-        if (hudOverlay) hudOverlay.style.display = 'none';
+        updateCameraHudLayout();
         controls.enabled = true;
         camera.fov = 45;
         camera.updateProjectionMatrix();
@@ -2249,7 +2276,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         controls.target.set(0, 0, 0);
       } else if (preset === 'chase') {
         pipCard.classList.remove('visible');
-        if (hudOverlay) hudOverlay.style.display = 'none';
+        updateCameraHudLayout();
         controls.enabled = true;
         camera.fov = 52;
         camera.updateProjectionMatrix();
@@ -2257,24 +2284,40 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         const camKey = preset.replace('cam_', '');
         const rig = cameraRigMap[camKey];
         if (rig) {
-          const fwdDir = ueDirToThree(rig.info.forward || [1, 0, 0]);
-          const upDir = ueDirToThree(rig.info.up || [0, 0, 1]);
-          camera.position.copy(rig.posThree);
-          camera.up.copy(upDir);
-          camera.lookAt(rig.posThree.clone().add(fwdDir));
-          controls.target.copy(rig.posThree.clone().add(fwdDir.clone().multiplyScalar(50.0)));
           controls.enabled = false;
 
-          const fovH = Number(rig.info.fov_h_deg || 40.0);
-          const aspect = 16.0 / 9.0;
-          const fovV = (2.0 * Math.atan(Math.tan((fovH * Math.PI) / 360.0) / aspect) * 180.0) / Math.PI;
-          camera.fov = Math.max(15, Math.min(85, fovV));
-          camera.updateProjectionMatrix();
+          let lookDir, upDir;
+          if (rig.info.rot_deg) {
+            const r = THREE.MathUtils.degToRad(rig.info.rot_deg[0]);
+            const p = THREE.MathUtils.degToRad(rig.info.rot_deg[1]);
+            const y = THREE.MathUtils.degToRad(rig.info.rot_deg[2]);
+            const forwardUE = [
+              Math.cos(p) * Math.cos(y),
+              Math.cos(p) * Math.sin(y),
+              Math.sin(p)
+            ];
+            lookDir = ueDirToThree(forwardUE);
+            const upUE = [
+              -(Math.cos(r)*Math.sin(p)*Math.cos(y) + Math.sin(r)*Math.sin(y)),
+              -(Math.cos(r)*Math.sin(p)*Math.sin(y) - Math.sin(r)*Math.cos(y)),
+              Math.cos(r)*Math.cos(p)
+            ];
+            upDir = ueDirToThree(upUE);
+          } else {
+            lookDir = ueDirToThree(rig.info.forward || [1, 0, 0]);
+            upDir = ueDirToThree(rig.info.up || [0, 0, 1]);
+          }
+
+          camera.position.copy(rig.posThree);
+          camera.up.copy(upDir);
+          camera.lookAt(rig.posThree.clone().add(lookDir));
+          controls.target.copy(rig.posThree.clone().add(lookDir.clone().multiplyScalar(50.0)));
 
           if (hudOverlay && hudImg && rig.info.thumbnail_b64) {
             hudImg.src = rig.info.thumbnail_b64;
-            updateCameraHudLayout();
           }
+
+          updateCameraHudLayout();
 
           if (rig.info.thumbnail_b64) {
             pipCard.classList.add('visible');
@@ -2337,7 +2380,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       },
       selects: {
         'select-traj-style': 'contrast',
-        'select-speed': '1'
+        'select-speed': '1',
+        'select-active-model': defaultModelKey
       },
       cameraPreset: 'orbit',
       panels: {
@@ -2404,6 +2448,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
         const speedSelect = document.getElementById('select-speed');
         if (speedSelect) settings.selects['select-speed'] = speedSelect.value;
+
+        const modelSelect = document.getElementById('select-active-model');
+        if (modelSelect) settings.selects['select-active-model'] = modelSelect.value;
 
         localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
       } catch (err) {
@@ -2495,6 +2542,75 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       const selectSpeed = document.getElementById('select-speed');
       if (selectSpeed) {
         playbackSpeed = parseFloat(selectSpeed.value);
+      }
+    }
+
+    function applyModel(mKey, skipSave = false) {
+      const models = SCENE_DATA.models || {};
+      const chosen = models[mKey];
+      if (!chosen || !chosen.frames || chosen.frames.length === 0) return;
+
+      frames = chosen.frames;
+      slider.max = String(Math.max(0, frames.length - 1));
+
+      precomputeRunningMaeForActiveFrames();
+
+      const descEl = document.getElementById('model-desc-badge');
+      if (descEl) {
+        descEl.innerHTML = `<span style="color:${chosen.color || '#00f5d4'};font-weight:700;">${chosen.short_name || chosen.name}</span>: ${chosen.desc || ''}`;
+      }
+      const activeBadge = document.getElementById('active-model-summary-badge');
+      if (activeBadge) {
+        activeBadge.textContent = chosen.short_name || chosen.name;
+      }
+
+      if (chosen.metrics) {
+        const m = chosen.metrics;
+        const mae = Number(m.mae_3d || 0);
+        const rmse = Number(m.rmse_3d || 0);
+        const elMae = document.getElementById('sum-mae3d');
+        if (elMae) elMae.textContent = `${mae.toFixed(1)} cm (${(mae / 100).toFixed(2)} m)`;
+        const elRmse = document.getElementById('sum-rmse3d');
+        if (elRmse) elRmse.textContent = `${rmse.toFixed(1)} cm (${(rmse / 100).toFixed(2)} m)`;
+        const elAxes = document.getElementById('sum-axes');
+        if (elAxes && m.mae_x !== undefined) {
+          elAxes.textContent = `${Number(m.mae_x || 0).toFixed(1)} / ${Number(m.mae_y || 0).toFixed(1)} / ${Number(m.mae_z || 0).toFixed(1)}`;
+        }
+      }
+
+      if (chosen.color) {
+        activeModelColor = parseInt(chosen.color.replace('#', '0x'), 16);
+      } else {
+        activeModelColor = null;
+      }
+      const swEst = document.getElementById('swatch-est');
+      if (swEst && chosen.color) {
+        swEst.style.background = chosen.color;
+      }
+
+      const rawEst = [];
+      frames.forEach(f => {
+        if (f.est_pos_cm) {
+          const p = ueToThree(f.est_pos_cm);
+          rawEst.push(new THREE.Vector3(p.x, p.y + 0.55, p.z));
+        }
+      });
+      const cleanEst = deduplicatePoints(rawEst);
+      if (cleanEst.length >= 2) {
+        estCurve = new THREE.CatmullRomCurve3(cleanEst);
+      }
+
+      rebuildTrajectories(currentTrajRadius, currentTrajStyle);
+
+      const selectModel = document.getElementById('select-active-model');
+      if (selectModel && selectModel.value !== mKey) {
+        selectModel.value = mKey;
+      }
+
+      updateFrameState(currentFrameIdx);
+
+      if (!skipSave) {
+        saveViewerSettings();
       }
     }
 
@@ -2620,65 +2736,26 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       const selectModel = document.getElementById('select-active-model');
       if (selectModel) {
         const modelsData = SCENE_DATA.models || null;
+        let activeKey = (settings?.selects && settings.selects['select-active-model']) || SCENE_DATA.active_model || 'cabin';
         if (modelsData && Object.keys(modelsData).length > 0) {
+          if (!modelsData[activeKey]) {
+            activeKey = Object.keys(modelsData)[0];
+          }
           selectModel.innerHTML = '';
           Object.keys(modelsData).forEach(mId => {
             const m = modelsData[mId];
             const opt = document.createElement('option');
             opt.value = mId;
             opt.textContent = m.name || mId;
-            if (mId === (SCENE_DATA.active_model || 'ukf')) opt.selected = true;
+            if (mId === activeKey) opt.selected = true;
             selectModel.appendChild(opt);
           });
         }
+        selectModel.value = activeKey;
         selectModel.addEventListener('change', e => {
-          const mKey = e.target.value;
-          const models = SCENE_DATA.models || {};
-          const chosen = models[mKey];
-          if (chosen && chosen.frames) {
-            frames = chosen.frames;
-            slider.max = String(Math.max(0, frames.length - 1));
-            const descEl = document.getElementById('model-desc-badge');
-            if (descEl) {
-              descEl.innerHTML = `<span style="color:${chosen.color || '#00f5d4'};font-weight:700;">${chosen.short_name || chosen.name}</span>: ${chosen.desc || ''}`;
-            }
-            if (chosen.metrics) {
-              const m = chosen.metrics;
-              const mae = Number(m.mae_3d || 0);
-              const rmse = Number(m.rmse_3d || 0);
-              const elMae = document.getElementById('sum-mae3d');
-              if (elMae) elMae.textContent = `${mae.toFixed(1)} cm (${(mae / 100).toFixed(2)} m)`;
-              const elRmse = document.getElementById('sum-rmse3d');
-              if (elRmse) elRmse.textContent = `${rmse.toFixed(1)} cm (${(rmse / 100).toFixed(2)} m)`;
-              const elAxes = document.getElementById('sum-axes');
-              if (elAxes && m.mae_x !== undefined) {
-                elAxes.textContent = `${Number(m.mae_x || 0).toFixed(1)} / ${Number(m.mae_y || 0).toFixed(1)} / ${Number(m.mae_z || 0).toFixed(1)}`;
-              }
-            }
-            if (chosen.color) {
-              activeModelColor = parseInt(chosen.color.replace('#', '0x'), 16);
-            } else {
-              activeModelColor = null;
-            }
-            const swEst = document.getElementById('swatch-est');
-            if (swEst && chosen.color) {
-              swEst.style.background = chosen.color;
-            }
-            const rawEst = [];
-            frames.forEach(f => {
-              if (f.est_pos_cm) {
-                const p = ueToThree(f.est_pos_cm);
-                rawEst.push(new THREE.Vector3(p.x, p.y + 0.55, p.z));
-              }
-            });
-            const cleanEst = deduplicatePoints(rawEst);
-            if (cleanEst.length >= 2) {
-              estCurve = new THREE.CatmullRomCurve3(cleanEst);
-            }
-            rebuildTrajectories(currentTrajRadius, currentTrajStyle);
-            updateFrameState(currentFrameIdx);
-          }
+          applyModel(e.target.value);
         });
+        applyModel(activeKey, true);
       }
 
       // Resizable Telemetry Panel (Left Edge Drag)
