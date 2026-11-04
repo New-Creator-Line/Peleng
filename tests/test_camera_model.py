@@ -1,4 +1,5 @@
 import math
+import os
 import numpy as np
 import pytest
 from src.camera_model import CameraModel, CameraParams, load_all_cameras
@@ -67,7 +68,8 @@ def test_point_projection_right_and_up():
 
 def test_load_all_cameras():
     """Verify loading real camera CSV files from hackathon folder with per-camera focal lengths."""
-    cameras = load_all_cameras("хакатон")
+    calib_dir = "data/raw/hackathon" if os.path.exists("data/raw/hackathon") else "хакатон"
+    cameras = load_all_cameras(calib_dir)
     assert len(cameras) == 5
     expected_focal = {1: 35.0, 2: 60.0, 3: 35.0, 4: 50.0, 5: 20.0}
     for cam_id in range(1, 6):

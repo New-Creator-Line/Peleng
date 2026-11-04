@@ -5,7 +5,9 @@ from pathlib import Path
 
 
 def test_data_yaml_structure_and_integrity():
-    yaml_path = Path("dataset/peleng.v3i.yolov8/data.yaml")
+    yaml_path = Path("data/datasets/yolo_v3/data.yaml")
+    if not yaml_path.exists():
+        yaml_path = Path("dataset/peleng.v3i.yolov8/data.yaml")
     assert yaml_path.exists(), f"Dataset config {yaml_path} does not exist"
 
     with open(yaml_path, "r", encoding="utf-8") as f:
@@ -39,7 +41,9 @@ def test_data_yaml_structure_and_integrity():
 
 
 def test_labels_validity():
-    labels_dir = Path("dataset/peleng.v3i.yolov8/train/labels")
+    labels_dir = Path("data/datasets/yolo_v3/train/labels")
+    if not labels_dir.exists():
+        labels_dir = Path("dataset/peleng.v3i.yolov8/train/labels")
     if not labels_dir.exists():
         pytest.skip("Labels dir not found (local dataset is gitignored)")
     assert labels_dir.exists()

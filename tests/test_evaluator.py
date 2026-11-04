@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pytest
 from src.evaluator import TrajectoryEvaluator, load_ground_truth
@@ -33,7 +34,16 @@ def test_peleng_mae_calculation():
 
 def test_load_ground_truth_excel_repair():
     """Verify loading object_transform_SM_AA_track.csv repairs row 402 ('авг.13')."""
-    gt_df = load_ground_truth("хакатон/object_transform_SM_AA_track.csv")
+    gt_path = (
+        "data/ground_truth/object_transform_SM_AA_track.csv"
+        if os.path.exists("data/ground_truth/object_transform_SM_AA_track.csv")
+        else (
+            "data/raw/hackathon/object_transform_SM_AA_track.csv"
+            if os.path.exists("data/raw/hackathon/object_transform_SM_AA_track.csv")
+            else "хакатон/object_transform_SM_AA_track.csv"
+        )
+    )
+    gt_df = load_ground_truth(gt_path)
     assert len(gt_df) >= 1000
     # Frame 402 should be numeric, not NaN or string
     val_402 = gt_df.loc[gt_df["Frame"] == 402, "Loc_X"].values[0]

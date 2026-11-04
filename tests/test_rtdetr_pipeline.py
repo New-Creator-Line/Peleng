@@ -1,13 +1,13 @@
 import os
 from pathlib import Path
 import pytest
-from train_rtdetr import RTDETRConfig, validate_environment, set_seed
+from scripts.training.train_rtdetr import RTDETRConfig, validate_environment, set_seed
 
 
 def test_rtdetr_config_defaults():
     cfg = RTDETRConfig()
-    assert cfg.model_name == "rtdetr-l.pt"
-    assert cfg.data_yaml == "dataset/peleng.v3i.yolov8/data.yaml"
+    assert cfg.model_name == "weights/pretrained/rtdetr-l.pt"
+    assert cfg.data_yaml == "data/datasets/yolo_v3/data.yaml"
     assert cfg.imgsz == 640
     assert cfg.batch_size == 4
     assert cfg.patience == 15
@@ -17,7 +17,7 @@ def test_rtdetr_config_defaults():
 
 
 def test_rtdetr_validate_environment_success():
-    cfg = RTDETRConfig(data_yaml="dataset/peleng.v3i.yolov8/data.yaml")
+    cfg = RTDETRConfig(data_yaml="data/datasets/yolo_v3/data.yaml")
     validate_environment(cfg)
 
 

@@ -1,13 +1,13 @@
 import os
 from pathlib import Path
 import pytest
-from train_yolo import TrainingConfig, validate_environment, set_seed
+from scripts.training.train_yolo import TrainingConfig, validate_environment, set_seed
 
 
 def test_training_config_defaults():
     cfg = TrainingConfig()
-    assert cfg.model_name == "yolov8x.pt"
-    assert cfg.data_yaml == "dataset/peleng.v3i.yolov8/data.yaml"
+    assert cfg.model_name == "weights/pretrained/yolov8x.pt"
+    assert cfg.data_yaml == "data/datasets/yolo_v3/data.yaml"
     assert cfg.imgsz == 512
     assert cfg.batch_size == 8
     assert cfg.patience == 15
@@ -15,7 +15,7 @@ def test_training_config_defaults():
 
 
 def test_validate_environment_success():
-    cfg = TrainingConfig(data_yaml="dataset/peleng.v3i.yolov8/data.yaml")
+    cfg = TrainingConfig(data_yaml="data/datasets/yolo_v3/data.yaml")
     # Should not raise
     validate_environment(cfg)
 

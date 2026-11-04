@@ -14,14 +14,35 @@ import pandas as pd
 from ultralytics import RTDETR, YOLO
 
 
+def resolve_weight_path(weights_path: Union[str, Path]) -> str:
+    """
+    Resolves weight file location, searching in canonical weights/pretrained
+    or weights/finetuned directories if the file is not at the exact path.
+    """
+    path = Path(weights_path)
+    if path.exists():
+        return str(path)
+
+    candidate_pretrained = Path("weights/pretrained") / path.name
+    if candidate_pretrained.exists():
+        return str(candidate_pretrained)
+
+    candidate_finetuned = Path("weights/finetuned") / path.name
+    if candidate_finetuned.exists():
+        return str(candidate_finetuned)
+
+    return str(weights_path)
+
+
 def load_detection_model(weights_path: Union[str, Path]) -> Union[YOLO, RTDETR]:
     """
     Factory loading either RT-DETR or YOLO model depending on weight filename or model type.
     """
-    path_str = str(weights_path).lower()
+    resolved_path = resolve_weight_path(weights_path)
+    path_str = str(resolved_path).lower()
     if "rtdetr" in path_str:
-        return RTDETR(str(weights_path))
-    return YOLO(str(weights_path))
+        return RTDETR(resolved_path)
+    return YOLO(resolved_path)
 
 
 def estimate_occlusion_status(
@@ -86,8 +107,9 @@ class PelengDetector:
     ) -> None:
         self.weights_path = Path(weights_path)
         if not self.weights_path.exists():
-            # Fallback search order: rtdetr best -> yolov8x best -> base models
+            # Fallback search order: yolo26s-seg -> rtdetr best -> yolov8x best -> base models
             for cand in [
+                Path("yolo26s-seg.pt"),
                 Path("weights/peleng_rtdetr_best.pt"),
                 Path("weights/peleng_yolov8x_best.pt"),
                 Path("rtdetr-l.pt"),

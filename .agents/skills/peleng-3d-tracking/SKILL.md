@@ -52,12 +52,13 @@ $$\text{MAE}_{\text{3D}} = \frac{1}{N} \sum_{i=1}^N \|\mathbf{p}_i - \mathbf{p}_
 Run full pipeline on real YOLO detections:
 ```bash
 python main.py \
-  --calib-dir хакатон \
-  --detections results/detections_2d_yolo_real.csv \
-  --gt хакатон/object_transform_SM_AA_track.csv \
-  --output results/output_trajectory_yolo.csv \
-  --metrics-out results/metrics_summary_yolo.json
+  --calib-dir data/raw/hackathon \
+  --detections results/detections/detections_2d_yolo_real.csv \
+  --gt data/ground_truth/object_transform_SM_AA_track.csv \
+  --output results/trajectories/output_trajectory_yolo.csv \
+  --metrics-out results/metrics/metrics_summary_yolo.json
 ```
+*(Note: `--calib-dir хакатон` and `--gt хакатон/object_transform_SM_AA_track.csv` are also fully supported for backwards compatibility).*
 
 Blind Test Mode (when ground truth is withheld):
 ```bash

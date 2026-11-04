@@ -221,20 +221,35 @@ __marimo__/
 
 
 # Machine Learning weights, checkpoints and training runs
-*.pt
 *.pth
-*.onnx
+*.pt
 *.engine
 *.bin
-weights/
-runs/
+*.onnx
+weights/pretrained/
+runs/**/weights/
 
-# Training datasets, zip archives and debug images
+# Allow fine-tuned model weights (tracked via Git LFS)
+!weights/finetuned/
+!weights/finetuned/**
+
+# Allow training plots, PR/F1 curves, and metrics from runs
+!runs/**/
+!runs/**/*.png
+!runs/**/*.csv
+!runs/**/*.yaml
+!runs/**/*.json
+
+# Training datasets, raw heavy videos, and archives
+data/raw/**/*.mp4
+data/datasets/
+data/archives/
 dataset/
 dataset*/
 peleng.v1i.yolov8/
 *.zip
 debug_*.jpg
+ТЗ хакатон.pdf
 
 # Large video outputs
 results/videos/
@@ -242,7 +257,6 @@ results/videos/
 # Compiled C++ Python extensions and build artifacts
 *.pyd
 build/
-
 # macOS and Agent Memory Bank (prevent accidental commits)
 .DS_Store
 **/.DS_Store
@@ -252,3 +266,8 @@ results/check_*.jpg
 results/qa_*.png
 results/.cache_*.npz
 results/peleng_3d_viewer*.html
+
+*.egg-info/
+*.rar
+*.zip
+*.7z
