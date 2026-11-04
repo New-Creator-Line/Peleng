@@ -226,17 +226,18 @@ __marimo__/
 *.onnx
 *.engine
 *.bin
-weights/pretrained/
-weights/finetuned/
-weights/*.pt
+*.torchscript
+weights/
 runs/
 
 # Training datasets, raw heavy videos, and archives
 data/raw/**/*.mp4
-data/datasets/
-data/archives/
-dataset/
-dataset*/
+/data/datasets/
+/data/cabin_dataset/
+data/cabin_dataset/
+/data/archives/
+/dataset/
+/dataset*/
 peleng.v1i.yolov8/
 *.zip
 debug_*.jpg
@@ -249,3 +250,5 @@ results/videos/
 *.pyd
 build/
 *.egg-info/
+
+*.part

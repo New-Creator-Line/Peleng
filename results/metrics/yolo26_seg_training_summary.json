@@ -1,7 +1,7 @@
 {
   "config": {
     "data_yaml": "data/datasets/My First Project.v1i.yolo26/data.yaml",
-    "model_name": "weights/finetuned/peleng_yolo26x_seg_roboflow_best.pt",
+    "model_name": "runs/segment/runs/segment/peleng_yolo26x_seg_roboflow/weights/best.pt",
     "epochs": 15,
     "batch_size": 2,
     "imgsz": 1024,
@@ -9,19 +9,20 @@
     "workers": 2,
     "patience": 0,
     "seed": 42,
-    "lr0": 0.0001,
-    "close_mosaic": 10,
-    "erasing": 0.4,
-    "mosaic": 1.0,
-    "mixup": 0.1,
+    "lr0": 5e-05,
+    "close_mosaic": 0,
+    "erasing": 0.0,
+    "mosaic": 0.0,
+    "mixup": 0.0,
+    "warmup_epochs": 0.0,
     "cache": "ram",
     "nbs": 64,
     "freeze": 10,
     "project": "runs/segment",
-    "name": "peleng_yolo26x_seg_roboflow_plus15",
+    "name": "peleng_yolo26x_seg_clean_polish",
     "save_weights_dir": "weights/finetuned",
-    "best_weight_name": "peleng_yolo26x_seg_roboflow_plus15_best.pt"
+    "best_weight_name": "peleng_yolo26x_seg_clean_polish_best.pt"
   },
-  "save_dir": "C:\\projects\\Peleng\\runs\\segment\\runs\\segment\\peleng_yolo26x_seg_roboflow_plus15",
-  "exported_weight": "weights\\finetuned\\peleng_yolo26x_seg_roboflow_plus15_best.pt"
+  "save_dir": "C:\\projects\\Peleng\\runs\\segment\\runs\\segment\\peleng_yolo26x_seg_clean_polish",
+  "exported_weight": "weights\\finetuned\\peleng_yolo26x_seg_clean_polish_best.pt"
 }

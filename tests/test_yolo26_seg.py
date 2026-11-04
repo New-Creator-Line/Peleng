@@ -1,6 +1,11 @@
 import numpy as np
 import pytest
-from src.detector import YOLO26SegmentationDetector, compute_mask_moments, DetectionResult
+from src.detector import (
+    YOLO26SegmentationDetector,
+    compute_mask_moments,
+    suppress_nested_detections,
+    DetectionResult,
+)
 
 
 def test_compute_mask_moments_rectangle():
@@ -60,3 +65,53 @@ def test_yolo26s_seg_batch_inference():
     assert len(batch_res) == 2
     assert isinstance(batch_res[0], list)
     assert isinstance(batch_res[1], list)
+
+
+def test_suppress_nested_detections():
+    # Large box: whole truck
+    # Center u=1224.4, v=519.2, w=350.0, h=108.0 (x from 1049.4 to 1399.4)
+    # Small box: cabin inside
+    # Center u=1150.0, v=518.0, w=199.0, h=103.0 (x from 1050.5 to 1249.5)
+    dummy_poly = np.zeros((4, 2), dtype=np.float32)
+
+    det_large = DetectionResult(
+        cam_id=3,
+        u=1224.4,
+        v=519.2,
+        w=350.0,
+        h=108.0,
+        conf=0.822,
+        polygon=dummy_poly,
+        is_truncated=False,
+        class_id=0,
+        class_name="truck",
+    )
+    det_small = DetectionResult(
+        cam_id=3,
+        u=1150.0,
+        v=518.0,
+        w=199.0,
+        h=103.0,
+        conf=0.905,
+        polygon=dummy_poly,
+        is_truncated=False,
+        class_id=0,
+        class_name="truck",
+    )
+
+    filtered = suppress_nested_detections([det_small, det_large], iomin_threshold=0.50)
+    assert len(filtered) == 1
+    # Should retain the large box dimensions
+    assert filtered[0].w == 350.0
+    # Should absorb the higher confidence from the small box
+    assert filtered[0].conf == 0.905
+
+
+def test_suppress_nested_detections_disjoint():
+    # Two separate non-overlapping boxes
+    dummy_poly = np.zeros((4, 2), dtype=np.float32)
+    det1 = DetectionResult(cam_id=1, u=100.0, v=100.0, w=50.0, h=50.0, conf=0.8, polygon=dummy_poly, is_truncated=False, class_id=0, class_name="truck")
+    det2 = DetectionResult(cam_id=1, u=800.0, v=500.0, w=50.0, h=50.0, conf=0.7, polygon=dummy_poly, is_truncated=False, class_id=0, class_name="truck")
+
+    filtered = suppress_nested_detections([det1, det2], iomin_threshold=0.50)
+    assert len(filtered) == 2

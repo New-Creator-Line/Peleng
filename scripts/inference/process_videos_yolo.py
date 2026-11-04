@@ -1,23 +1,31 @@
 """
-Process Multi-Camera Video Streams with Fine-Tuned YOLOv8x.
+Process Multi-Camera Video Streams with Fine-Tuned YOLO / RT-DETR.
 
-Generates:
-1. Individual annotated videos for Cameras 1 to 5: results/videos/camera_{i}_yolo.mp4
-2. Synchronized 5-Camera Multi-View Dashboard: results/videos/multiview_dashboard_yolo.mp4
+Supports an arbitrary number of cameras N discovered automatically from *Actor{id}.mp4:
+1. Individual annotated videos for each camera: results/videos/camera_{id}_detected.mp4
+2. Synchronized Multi-View Dashboard: results/videos/multiview_dashboard_yolo.mp4
 3. Unified 2D Detections CSV: results/detections/detections_2d_yolo_real.csv
 """
 
 import argparse
 import logging
+import math
 import os
+import re
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import cv2
 import numpy as np
 import pandas as pd
 import torch
+from src.camera_model import CameraTimeline, load_all_cameras
 from src.yolo_detector import load_detection_model, estimate_occlusion_status
 
 logging.basicConfig(
@@ -36,28 +44,39 @@ def draw_detection(
     frame_idx: int,
     label: str = "truck",
     is_occluded: bool = False,
+    proj_3d_uv: Optional[Tuple[float, float]] = None,
 ) -> None:
-    """Draws styled bounding box and tracking HUD on frame."""
+    """Draws styled bounding box, cabin 3D projection crosshair, and tracking HUD on frame."""
     x1, y1, x2, y2 = [int(v) for v in box]
     h_img, w_img = frame.shape[:2]
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(w_img - 1, x2), min(h_img - 1, y2)
 
-    # Box outline
-    color = (0, 140, 255) if is_occluded else (0, 255, 128)  # Amber if occluded, emerald if clear
+    if label == "cabin":
+        color = (0, 230, 255)  # Vibrant cyan/gold for cabin
+    else:
+        color = (0, 165, 255) if is_occluded else (0, 255, 128)
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
 
-    # Center point (u, v)
     u_center = int((x1 + x2) / 2)
     v_center = int((y1 + y2) / 2)
     cv2.circle(frame, (u_center, v_center), 5, (0, 0, 255), -1)
     cv2.circle(frame, (u_center, v_center), 7, (255, 255, 255), 1)
 
-    # Label badge with confidence
-    occ_tag = " [OCCLUDED]" if is_occluded else ""
+    if proj_3d_uv is not None:
+        up, vp = int(round(proj_3d_uv[0])), int(round(proj_3d_uv[1]))
+        # Draw 3D cabin projection only when it falls within the visible truck box region
+        if max(0, x1 - 25) <= up <= min(w_img - 1, x2 + 25) and max(0, y1 - 25) <= vp <= min(h_img - 1, y2 + 25):
+            cv2.line(frame, (u_center, v_center), (up, vp), (255, 220, 0), 2, cv2.LINE_AA)
+            cv2.circle(frame, (up, vp), 6, (255, 220, 0), -1, cv2.LINE_AA)
+            cv2.circle(frame, (up, vp), 8, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.line(frame, (up - 12, vp), (up + 12, vp), (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.line(frame, (up, vp - 12), (up, vp + 12), (255, 255, 255), 1, cv2.LINE_AA)
+
+    occ_tag = " [EDGE/OCC]" if is_occluded else ""
     caption = f"{label.upper()} {conf:.1%}{occ_tag}"
     (w_text, h_text), baseline = cv2.getTextSize(caption, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-    
+
     badge_y1 = max(0, y1 - h_text - 8)
     badge_y2 = badge_y1 + h_text + 8
     badge_x2 = x1 + w_text + 12
@@ -89,7 +108,7 @@ def draw_hud(
 
     hud_text = (
         f"CAMERA {cam_id} | FRAME: {frame_idx:04d}/{total_frames:04d} | "
-        f"DETECTIONS: {num_dets} | YOLOv8x EXTRA-LARGE"
+        f"DETECTIONS: {num_dets} | PELENG 3D VISION"
     )
     cv2.putText(
         frame,
@@ -110,11 +129,13 @@ def create_info_card(
     fps: float,
     width: int = 640,
     height: int = 360,
+    pos_3d: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Creates a telemetry dashboard card for the 6th slot in multi-view grid."""
+    """Creates a telemetry dashboard card for the multi-view grid."""
     card = np.full((height, width, 3), 20, dtype=np.uint8)
+    cam_ids = sorted(cam_detections.keys())
+    num_cams = len(cam_ids)
 
-    # Header
     cv2.rectangle(card, (0, 0), (width, 50), (35, 45, 60), -1)
     cv2.putText(
         card,
@@ -127,71 +148,49 @@ def create_info_card(
         cv2.LINE_AA,
     )
 
-    # Telemetry metrics
-    y_pos = 90
-    spacing = 38
+    y_pos = 84
+    spacing = 34
+    xyz_str = f"X={pos_3d[0]:.0f} Y={pos_3d[1]:.0f} Z={pos_3d[2]:.0f}" if pos_3d is not None else "Computing..."
     metrics = [
-        ("Model", "YOLOv8x Fine-Tuned (Truck)"),
+        ("Model", "Peleng Fine-Tuned Detector"),
         ("Sync Frame", f"{frame_idx:04d} / {total_frames:04d}"),
         ("Process FPS", f"{fps:.1f} FPS"),
-        ("Cams with Target", f"{sum(1 for v in cam_detections.values() if v > 0)} / 5"),
+        ("Cams with Target", f"{sum(1 for v in cam_detections.values() if v > 0)} / {num_cams}"),
+        ("3D Cabin (UE)", xyz_str),
     ]
 
     for label, val in metrics:
-        cv2.putText(
-            card,
-            f"{label}:",
-            (25, y_pos),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (160, 170, 180),
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            card,
-            val,
-            (220, y_pos),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
+        cv2.putText(card, f"{label}:", (25, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (160, 170, 180), 1, cv2.LINE_AA)
+        cv2.putText(card, val, (220, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
         y_pos += spacing
 
-    # Camera status indicators
     y_pos += 10
-    cv2.putText(
-        card,
-        "Camera Streams Status:",
-        (25, y_pos),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (130, 140, 150),
-        1,
-        cv2.LINE_AA,
-    )
+    cv2.putText(card, "Camera Streams Status:", (25, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (130, 140, 150), 1, cv2.LINE_AA)
     y_pos += 30
 
     x_indicator = 30
-    for c_id in range(1, 6):
+    step_x = max(60, min(115, (width - 60) // max(1, num_cams)))
+    for c_id in cam_ids:
         has_det = cam_detections.get(c_id, 0) > 0
         dot_color = (0, 255, 128) if has_det else (100, 100, 100)
         cv2.circle(card, (x_indicator + 12, y_pos), 8, dot_color, -1)
-        cv2.putText(
-            card,
-            f"C{c_id}",
-            (x_indicator + 26, y_pos + 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (240, 240, 240),
-            1,
-            cv2.LINE_AA,
-        )
-        x_indicator += 115
+        cv2.putText(card, f"C{c_id}", (x_indicator + 26, y_pos + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (240, 240, 240), 1, cv2.LINE_AA)
+        x_indicator += step_x
 
     return card
+
+
+def discover_camera_videos(videos_dir: str) -> Dict[int, str]:
+    """Discovers all camera MP4 streams (*Actor{id}.mp4) in videos_dir for arbitrary N cameras."""
+    v_dir = Path(videos_dir)
+    cam_videos: Dict[int, str] = {}
+    for mp4_path in sorted(v_dir.glob("*Actor*.mp4")):
+        m = re.search(r"Actor(\d+)\.mp4$", mp4_path.name, re.IGNORECASE)
+        if m:
+            cam_videos[int(m.group(1))] = str(mp4_path)
+    if not cam_videos:
+        raise FileNotFoundError(f"No camera videos (*Actor*.mp4) found in {videos_dir}")
+    return dict(sorted(cam_videos.items()))
 
 
 def process_all_videos(
@@ -204,73 +203,82 @@ def process_all_videos(
     device: str = "0",
 ) -> Dict[str, Any]:
     """
-    Simultaneously processes all 5 synchronized camera streams:
-    - Generates 5 camera output MP4 videos
+    Simultaneously processes all synchronized camera streams (arbitrary N cameras):
+    - Generates N camera output MP4 videos
     - Generates 1 combined Multi-View Grid MP4 video
     - Saves unified 2D detections CSV
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     Path(csv_output).parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Loading YOLOv8 model from: {weights_path}")
+    logger.info(f"Loading detection model from: {weights_path}")
     model = load_detection_model(weights_path)
 
-    # Map video files to camera IDs
-    cam_videos: Dict[int, str] = {}
-    v_dir = Path(videos_dir)
-    for c_id in range(1, 6):
-        matches = list(v_dir.glob(f"*Actor{c_id}.mp4"))
-        if not matches:
-            raise FileNotFoundError(f"Video for Camera {c_id} not found in {videos_dir}")
-        cam_videos[c_id] = str(matches[0])
-        logger.info(f"Camera {c_id} video: {matches[0].name}")
-
-    # Open video capture handles
-    caps: Dict[int, cv2.VideoCapture] = {}
+    cam_videos = discover_camera_videos(videos_dir)
+    cam_ids = sorted(cam_videos.keys())
+    num_cams = len(cam_ids)
     for c_id, path in cam_videos.items():
-        caps[c_id] = cv2.VideoCapture(path)
+        logger.info(f"Camera {c_id} video: {Path(path).name}")
 
-    # Read video metadata from Camera 1
-    total_frames = int(caps[1].get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = caps[1].get(cv2.CAP_PROP_FPS) or 30.0
-    w_orig = int(caps[1].get(cv2.CAP_PROP_FRAME_WIDTH))
-    h_orig = int(caps[1].get(cv2.CAP_PROP_FRAME_HEIGHT))
-    logger.info(f"Video parameters: {w_orig}x{h_orig} @ {fps} FPS, Total Frames: {total_frames}")
+    # Load camera calibrations and precomputed 3D trajectory (if available) to project 3D cabin center
+    cameras: Dict[int, CameraTimeline] = {}
+    try:
+        cameras = load_all_cameras(videos_dir)
+    except Exception:
+        pass
+    traj_3d_map: Dict[int, np.ndarray] = {}
+    traj_csv = Path("results/trajectories/output_trajectory_yolo.csv")
+    if traj_csv.exists():
+        try:
+            t_df = pd.read_csv(traj_csv, sep=";")
+            for _, r in t_df.iterrows():
+                traj_3d_map[int(r["Frame"])] = np.array([float(r["Loc_X"]), float(r["Loc_Y"]), float(r["Loc_Z"])])
+        except Exception:
+            pass
 
-    # Initialize video writers for individual cameras
+    caps: Dict[int, cv2.VideoCapture] = {c_id: cv2.VideoCapture(path) for c_id, path in cam_videos.items()}
+
+    first_cap = caps[cam_ids[0]]
+    total_frames = int(first_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = first_cap.get(cv2.CAP_PROP_FPS) or 30.0
+    w_orig = int(first_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h_orig = int(first_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    logger.info(f"Video parameters: {w_orig}x{h_orig} @ {fps} FPS, Total Frames: {total_frames}, Cameras: {num_cams}")
+
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writers: Dict[int, cv2.VideoWriter] = {}
     output_video_paths: Dict[int, str] = {}
-    for c_id in range(1, 6):
+    for c_id in cam_ids:
         out_path = Path(output_dir) / f"camera_{c_id}_detected.mp4"
         writers[c_id] = cv2.VideoWriter(str(out_path), fourcc, fps, (w_orig, h_orig))
         output_video_paths[c_id] = str(out_path)
 
-    # Initialize video writer for multi-view dashboard (3 columns x 2 rows, each tile 640x360 -> total 1920x720)
-    grid_w, grid_h = 1920, 720
+    tile_w, tile_h = 640, 360
+    total_slots = num_cams + 1
+    grid_cols = min(3, total_slots)
+    grid_rows = int(math.ceil(total_slots / grid_cols))
+    grid_w, grid_h = grid_cols * tile_w, grid_rows * tile_h
     dashboard_path = Path(output_dir) / "multiview_dashboard_yolo.mp4"
     grid_writer = cv2.VideoWriter(str(dashboard_path), fourcc, fps, (grid_w, grid_h))
 
     detection_records: List[Dict[str, Any]] = []
-
     t_start = time.perf_counter()
-    logger.info(f"Processing {total_frames} frames across 5 camera streams...")
+    logger.info(f"Processing {total_frames} frames across {num_cams} camera streams...")
 
     try:
         for frame_idx in range(total_frames):
             raw_frames: Dict[int, np.ndarray] = {}
-            for c_id in range(1, 6):
+            for c_id in cam_ids:
                 ret, frame = caps[c_id].read()
                 if not ret or frame is None:
                     break
                 raw_frames[c_id] = frame
 
-            if len(raw_frames) < 5:
+            if len(raw_frames) < num_cams:
                 logger.warning(f"Stream ended early at frame {frame_idx}")
                 break
 
-            # Batch predict on all 5 frames for GPU efficiency
-            frames_list = [raw_frames[c_id] for c_id in range(1, 6)]
+            frames_list = [raw_frames[c_id] for c_id in cam_ids]
             results = model.predict(
                 source=frames_list,
                 conf=conf_threshold,
@@ -280,10 +288,11 @@ def process_all_videos(
             )
 
             cam_det_counts: Dict[int, int] = {}
-            grid_tiles: Dict[int, np.ndarray] = {}
+            grid_tiles: List[np.ndarray] = []
 
-            for idx, c_id in enumerate(range(1, 6)):
+            for idx, c_id in enumerate(cam_ids):
                 frame = raw_frames[c_id]
+                h_f, w_f = frame.shape[:2]
                 res = results[idx]
                 boxes = res.boxes
 
@@ -299,8 +308,25 @@ def process_all_videos(
                         xywh = boxes.xywh[b_idx].cpu().numpy().tolist()
 
                         u, v, w, h = xywh
-                        is_occ, occ_score = estimate_occlusion_status(float(u), float(v), float(w), float(h), cam_id=c_id)
-                        draw_detection(frame, tuple(xyxy), conf, c_id, frame_idx, is_occluded=is_occ)
+                        is_occ, occ_score = estimate_occlusion_status(
+                            float(u), float(v), float(w), float(h), cam_id=c_id, img_w=w_f, img_h=h_f
+                        )
+                        # Visual occlusion badge only when touching border or severely slit (avoid false tag on rear-view Cam 2)
+                        vis_occ = (
+                            xyxy[0] <= 15.0
+                            or xyxy[2] >= w_f - 15.0
+                            or xyxy[1] <= 15.0
+                            or xyxy[3] >= h_f - 15.0
+                            or (w / max(1.0, h) < 0.85)
+                        )
+                        proj_uv = None
+                        if frame_idx in traj_3d_map and c_id in cameras:
+                            up, vp, zc = cameras[c_id].get_model(frame_idx).project_point(traj_3d_map[frame_idx])
+                            if zc > 0:
+                                proj_uv = (up, vp)
+                        label = "cabin" if "cabin" in weights_path.lower() else "truck"
+                        color_box = (0, 230, 255) if label == "cabin" else ((0, 165, 255) if vis_occ else (0, 255, 128))
+                        draw_detection(frame, tuple(xyxy), conf, c_id, frame_idx, label=label, is_occluded=vis_occ, proj_3d_uv=proj_uv)
 
                         detection_records.append({
                             "Frame": frame_idx,
@@ -317,24 +343,24 @@ def process_all_videos(
 
                 cam_det_counts[c_id] = n_dets
                 draw_hud(frame, c_id, frame_idx, total_frames, n_dets)
-
-                # Write individual full-HD camera frame
                 writers[c_id].write(frame)
+                grid_tiles.append(cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_AREA))
 
-                # Downsample tile for dashboard grid (640x360)
-                grid_tiles[c_id] = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)
-
-            # Build 2x3 dashboard grid
-            # Row 1: Cam 1, Cam 2, Cam 3
-            # Row 2: Cam 4, Cam 5, Telemetry Card
             elapsed = max(0.001, time.perf_counter() - t_start)
-            current_fps = (frame_idx + 1) * 5 / elapsed
+            current_fps = (frame_idx + 1) * num_cams / elapsed
 
-            info_tile = create_info_card(frame_idx, total_frames, cam_det_counts, current_fps, 640, 360)
-            row_top = np.hstack([grid_tiles[1], grid_tiles[2], grid_tiles[3]])
-            row_bot = np.hstack([grid_tiles[4], grid_tiles[5], info_tile])
-            dashboard_frame = np.vstack([row_top, row_bot])
+            info_tile = create_info_card(
+                frame_idx, total_frames, cam_det_counts, current_fps, tile_w, tile_h, pos_3d=traj_3d_map.get(frame_idx)
+            )
+            grid_tiles.append(info_tile)
+            while len(grid_tiles) < grid_rows * grid_cols:
+                grid_tiles.append(np.full((tile_h, tile_w, 3), 15, dtype=np.uint8))
 
+            rows_img = [
+                np.hstack(grid_tiles[r * grid_cols : (r + 1) * grid_cols])
+                for r in range(grid_rows)
+            ]
+            dashboard_frame = np.vstack(rows_img)
             grid_writer.write(dashboard_frame)
 
             if (frame_idx + 1) % 100 == 0 or frame_idx == total_frames - 1:
@@ -346,16 +372,15 @@ def process_all_videos(
                 )
 
     finally:
-        for c_id, cap in caps.items():
+        for cap in caps.values():
             cap.release()
-        for c_id, writer in writers.items():
+        for writer in writers.values():
             writer.release()
         grid_writer.release()
 
     total_time = time.perf_counter() - t_start
-    logger.info(f"Video processing complete in {total_time:.2f}s ({total_frames * 5 / total_time:.1f} FPS)!")
+    logger.info(f"Video processing complete in {total_time:.2f}s ({total_frames * num_cams / total_time:.1f} FPS)!")
 
-    # Save 2D detections CSV
     df = pd.DataFrame(detection_records)
     df.to_csv(csv_output, sep=";", index=False)
     logger.info(f"Saved {len(df)} 2D detections to: {csv_output}")
@@ -378,10 +403,13 @@ def parse_args() -> argparse.Namespace:
             return fallback
         return preferred
 
-    default_weights = resolve_path("weights/finetuned/peleng_yolov8x_best.pt", "weights/peleng_yolov8x_best.pt")
-    default_videos = resolve_path("data/raw/hackathon", "хакатон")
+    default_weights = resolve_path(
+        "runs/detect/train-3/weights/best.pt",
+        resolve_path("weights/finetuned/peleng_yolov8x_best.pt", "weights/peleng_yolov8x_best.pt"),
+    )
+    default_videos = resolve_path("хакатон", "data/raw/hackathon")
 
-    parser = argparse.ArgumentParser(description="Process multi-camera videos with YOLOv8x")
+    parser = argparse.ArgumentParser(description="Process multi-camera videos with YOLO/RT-DETR")
     parser.add_argument("--weights", type=str, default=default_weights)
     parser.add_argument("--videos_dir", type=str, default=default_videos)
     parser.add_argument("--output_dir", type=str, default="results/videos")
@@ -395,7 +423,7 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     print("=" * 60)
-    print("  PELENG MULTI-CAMERA VIDEO GENERATOR (YOLOv8x)")
+    print("  PELENG MULTI-CAMERA VIDEO GENERATOR")
     print("=" * 60)
     res = process_all_videos(
         weights_path=args.weights,
@@ -407,6 +435,6 @@ if __name__ == "__main__":
         device=args.device,
     )
     print("\n--- Generation Summary ---")
-    print(f"Cameras 1-5 videos saved to: {args.output_dir}/")
+    print(f"Camera videos saved to: {args.output_dir}/")
     print(f"Multi-view Dashboard: {res['dashboard_video']}")
     print(f"Detections CSV: {res['detections_csv']} ({res['total_detections']} detections)")

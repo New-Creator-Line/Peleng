@@ -110,6 +110,17 @@ class CameraModel:
         v = float(uv_h[1] / uv_h[2])
         return u, v, z_cam
 
+    def get_ray_direction(self, u: float, v: float) -> np.ndarray:
+        """Returns unit 3D ray direction vector in world coordinates for pixel (u, v)."""
+        fx, fy, cx, cy = self.get_intrinsics()
+        ray_cam = np.array([(u - cx) / fx, (v - cy) / fy, 1.0], dtype=np.float64)
+        ray_world = self.R_cam.T @ ray_cam
+        return ray_world / (np.linalg.norm(ray_world) + 1e-12)
+
+    def pixel_to_world_ray(self, u: float, v: float) -> Tuple[np.ndarray, np.ndarray]:
+        """Returns (origin, unit_dir) in world coordinates for pixel (u, v)."""
+        return self.loc.copy(), self.get_ray_direction(u, v)
+
     def project_ray_to_z(self, u: float, v: float, target_z: float = 450.0) -> Optional[np.ndarray]:
         """Intersects a 2D pixel ray (u, v) with a horizontal world plane Z = target_z."""
         fx, fy, cx, cy = self.get_intrinsics()
